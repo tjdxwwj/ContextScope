@@ -3,9 +3,26 @@
  * 
  * A tool that captures and visualizes API requests,
  * prompts, completions, and token usage data in real-time.
+ * 
+ * Features:
+ * - Real-time request context visualization (like Chrome DevTools Network panel for AI Agents)
+ * - Interactive context explorer with expandable/collapsible request chains
+ * - Token consumption distribution analysis
+ * - Context heatmap showing which historical messages have most impact
+ * - Token-level visualization (system prompt, history, tool responses)
+ * - Attention heatmap for AI focus analysis
+ * - Context evolution timeline showing window compression/summary
+ * - Tool call dependency graph
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
+
+interface PluginLogger {
+  debug?: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
 import { RequestAnalyzerStorage } from './src/storage.js';
 import { RequestAnalyzerService } from './src/service.js';
 import { createAnalyzerHttpHandler } from './src/web/handler.js';
@@ -39,7 +56,7 @@ interface PluginConfig {
 const plugin = {
   id: 'contextscope',
   name: 'ContextScope',
-  description: 'Visualize and analyze API requests, prompts, completions, and token usage in real-time',
+  description: 'Visualize and analyze API requests, prompts, completions, and token usage in real-time with advanced context analysis',
   configSchema,
   
   register(api: OpenClawPluginApi) {
@@ -118,7 +135,8 @@ const plugin = {
             model: event.model
           });
         }
-      } catch (error) {
+      } catch (error)
+      {
         api.logger.warn(`Failed to capture LLM output: ${error}`);
       }
     });
@@ -143,24 +161,39 @@ const plugin = {
       acceptsArgs: true,
       handler: async (ctx) => {
         const stats = await service.getStats();
+        const storageStats = await service.getStorageStats();
         const args = ctx.args?.trim().toLowerCase();
+        const dashboardUrl = 'http://localhost:18789/plugins/contextscope';
         
         if (args === 'stats') {
           return {
-          text: `📊 ContextScope Stats:\n` +
-                `• Total requests: ${stats.totalRequests}\n` +
-                `• Today: ${stats.todayRequests}\n` +
-                `• This week: ${stats.weekRequests}\n` +
-                `• Storage used: ${stats.storageSize}\n` +
-                `• Dashboard: ${api.config.gateway?.bindUrl || 'http://localhost:8080'}/plugins/contextscope`
-        };
+            text: `📊 ContextScope Stats:\n` +
+                  `• Total requests: ${stats.totalRequests}\n` +
+                  `• Today: ${stats.todayRequests}\n` +
+                  `• This week: ${stats.weekRequests}\n` +
+                  `• Avg tokens: ${stats.averageTokens.toLocaleString()}\n` +
+                  `• Est. cost: $${stats.totalCost.toFixed(2)}\n` +
+                  `• Storage used: ${storageStats.storageSize}\n` +
+                  `• Dashboard: ${dashboardUrl}`
+          };
+        }
+        
+        if (args === 'help') {
+          return {
+            text: `🔍 ContextScope Commands:\n` +
+                  `• /analyzer - Show status\n` +
+                  `• /analyzer stats - Detailed statistics\n` +
+                  `• Dashboard: ${dashboardUrl}`
+          };
         }
         
         return {
           text: `🔍 ContextScope is active!\n` +
                 `• Capturing requests in real-time\n` +
-                `• Dashboard available at: ${api.config.gateway?.bindUrl || 'http://localhost:8080'}/plugins/contextscope\n` +
-                `• Use "/analyzer stats" for detailed statistics`
+                `• Advanced context analysis enabled\n` +
+                `• Dashboard: ${dashboardUrl}\n` +
+                `• Use "/analyzer stats" for detailed statistics\n` +
+                `• Use "/analyzer help" for commands`
         };
       }
     });

@@ -1,18 +1,18 @@
-# OpenClaw Request Analyzer Plugin - Standalone Setup
+# ContextScope - Standalone Setup
 
 ## 📋 Project Overview
 
-This is a **completely standalone** plugin for OpenClaw that provides real-time API request analysis and visualization. The plugin is designed to be:
+This is a **completely standalone** tool that provides real-time API request analysis and visualization. The tool is designed to be:
 
-- ✅ **Non-invasive** - No modifications to OpenClaw core code
+- ✅ **Non-invasive** - No modifications to core code
 - ✅ **Independent** - Can be developed and maintained separately
-- ✅ **Modular** - Standard OpenClaw plugin architecture
+- ✅ **Modular** - Standard plugin architecture
 - ✅ **Feature-rich** - Complete request analysis and visualization
 
 ## 🏗️ Project Structure
 
 ```
-request-analyzer/
+contextscope/
 ├── src/
 │   ├── config.ts            # Configuration schema and types
 │   ├── storage.ts           # SQLite storage implementation
@@ -42,9 +42,9 @@ chmod +x create-standalone.sh
 ### 2. Manual Setup
 
 ```bash
-# Create new directory outside OpenClaw
-mkdir openclaw-request-analyzer
-cd openclaw-request-analyzer
+# Create new directory
+mkdir contextscope
+cd contextscope
 
 # Copy all plugin files
 cp -r /path/to/this/directory/* .
@@ -55,19 +55,19 @@ npm install
 # Build the plugin
 npm run build
 
-# Install in OpenClaw
-cp -r dist/* ~/.openclaw/extensions/request-analyzer/
+# Install
+cp -r dist/* ~/.openclaw/extensions/contextscope/
 ```
 
-### 3. Configure OpenClaw
+### 3. Configure
 
-Add to your OpenClaw configuration:
+Add to your configuration:
 
 ```json
 {
   "plugins": {
     "entries": {
-      "request-analyzer": {
+      "contextscope": {
         "enabled": true,
         "config": {
           "storage": {
@@ -129,13 +129,13 @@ Add to your OpenClaw configuration:
 - **Local Storage**: All data stored locally in SQLite
 - **Content Anonymization**: Optional removal of sensitive data
 - **Configurable Retention**: Automatic cleanup of old data
-- **Access Control**: Uses OpenClaw's authentication system
+- **Access Control**: Uses authentication system
 
 ## 🛠️ Development
 
 ### Prerequisites
 - Node.js 22+
-- OpenClaw 2026.3.9+
+- Node.js 18+
 - TypeScript 5.0+
 
 ### Development Commands
@@ -178,17 +178,17 @@ npm run test:coverage
 
 ## 📈 API Endpoints
 
-The plugin provides several HTTP endpoints under `/plugins/request-analyzer/`:
+The plugin provides several HTTP endpoints under `/plugins/contextscope/`:
 
 ### Statistics Endpoint
 ```http
-GET /plugins/request-analyzer/api/stats
+GET /plugins/contextscope/api/stats
 ```
 Returns overall statistics including total requests, token usage, costs, etc.
 
 ### Requests Endpoint
 ```http
-GET /plugins/request-analyzer/api/requests?sessionId=xxx&provider=openai&limit=100
+GET /plugins/contextscope/api/requests?sessionId=xxx&provider=openai&limit=100
 ```
 Returns filtered request data with optional query parameters:
 - `sessionId`: Filter by session ID
@@ -202,14 +202,14 @@ Returns filtered request data with optional query parameters:
 
 ### Export Endpoint
 ```http
-GET /plugins/request-analyzer/api/export?format=json
-GET /plugins/request-analyzer/api/export?format=csv
+GET /plugins/contextscope/api/export?format=json
+GET /plugins/contextscope/api/export?format=csv
 ```
 Exports request data in JSON or CSV format with the same filtering options as the requests endpoint.
 
 ### Dashboard
 ```http
-GET /plugins/request-analyzer/
+GET /plugins/contextscope/
 ```
 Serves the interactive web dashboard.
 
@@ -239,9 +239,9 @@ You can enable/disable different chart types:
 ### Common Issues
 
 1. **Plugin not loading**
-   - Check that files are in `~/.openclaw/extensions/request-analyzer/`
+   - Check that files are in `~/.openclaw/extensions/contextscope/`
    - Verify the plugin is enabled in config
-   - Check OpenClaw logs for errors
+   - Check logs for errors
 
 2. **Dashboard not accessible**
    - Ensure gateway is running
@@ -259,7 +259,7 @@ You can enable/disable different chart types:
    - Check TypeScript configuration
 
 ### Debug Mode
-Enable debug logging in OpenClaw to see detailed plugin operations:
+Enable debug logging to see detailed operations:
 ```json
 {
   "logging": {
@@ -296,6 +296,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**Made with ❤️ for the OpenClaw community**
+**Made with ❤️ for the community**
 
-For support, create an issue on GitHub or join the OpenClaw community discussions.
+For support, create an issue on GitHub.

@@ -1,6 +1,6 @@
-# OpenClaw Request Analyzer Plugin
+# ContextScope
 
-A non-invasive plugin for OpenClaw that captures and visualizes API requests, prompts, completions, and token usage data in real-time.
+A tool that captures and visualizes API requests, prompts, completions, and token usage data in real-time.
 
 ## 🚀 Features
 
@@ -18,14 +18,14 @@ A non-invasive plugin for OpenClaw that captures and visualizes API requests, pr
 
 ### Option 1: Install from npm (when published)
 ```bash
-openclaw plugins install @yourname/openclaw-request-analyzer
+npm install contextscope
 ```
 
 ### Option 2: Local Development
 ```bash
 # Clone this repository
-git clone https://github.com/yourname/openclaw-request-analyzer.git
-cd openclaw-request-analyzer
+git clone https://github.com/yourname/contextscope.git
+cd contextscope
 
 # Install dependencies
 npm install
@@ -33,13 +33,13 @@ npm install
 # Build the plugin
 npm run build
 
-# Copy to OpenClaw extensions
-cp -r dist/* ~/.openclaw/extensions/request-analyzer/
+# Copy to extensions
+cp -r dist/* ~/.openclaw/extensions/contextscope/
 ```
 
 ### Option 3: Direct GitHub Install
 ```bash
-openclaw plugins install https://github.com/yourname/openclaw-request-analyzer.git
+npm install https://github.com/yourname/contextscope.git
 ```
 
 ## ⚙️ Configuration
@@ -50,7 +50,7 @@ Add to your OpenClaw config file:
 {
   "plugins": {
     "entries": {
-      "request-analyzer": {
+      "contextscope": {
         "enabled": true,
         "config": {
           "storage": {
@@ -87,7 +87,7 @@ Add to your OpenClaw config file:
 ### Dashboard
 Access the web dashboard at:
 ```
-http://your-gateway-host:port/plugins/request-analyzer
+http://your-gateway-host:port/plugins/contextscope
 ```
 
 Features:
@@ -112,14 +112,14 @@ Features:
 ### API Endpoints
 ```bash
 # Get statistics
-GET /plugins/request-analyzer/api/stats
+GET /plugins/contextscope/api/stats
 
 # Get requests with filters
-GET /plugins/request-analyzer/api/requests?sessionId=xxx&provider=openai&limit=100
+GET /plugins/contextscope/api/requests?sessionId=xxx&provider=openai&limit=100
 
 # Export data
-GET /plugins/request-analyzer/api/export?format=json
-GET /plugins/request-analyzer/api/export?format=csv
+GET /plugins/contextscope/api/export?format=json
+GET /plugins/contextscope/api/export?format=csv
 ```
 
 ## 📊 Configuration Options
@@ -148,17 +148,17 @@ GET /plugins/request-analyzer/api/export?format=csv
 
 ## 🔒 Privacy & Security
 
-- **Local Storage**: All data is stored locally in your OpenClaw workspace
+- **Local Storage**: All data is stored locally in your workspace
 - **Optional Anonymization**: Enable content anonymization to remove emails, phone numbers, API keys
 - **Configurable Retention**: Automatic cleanup of old data based on retention settings
 - **No External Calls**: The plugin doesn't send data to external services
-- **Access Control**: Uses OpenClaw's built-in authentication system
+- **Access Control**: Uses built-in authentication system
 
 ## 🛠️ Development
 
 ### Prerequisites
 - Node.js 22+
-- OpenClaw 2026.3.9+
+- Node.js 18+
 
 ### Setup
 ```bash
@@ -181,7 +181,7 @@ npm run build
 
 ### Project Structure
 ```
-openclaw-request-analyzer/
+contextscope/
 ├── src/
 │   ├── config.ts            # Configuration schema
 │   ├── storage.ts           # SQLite storage implementation
@@ -200,7 +200,7 @@ openclaw-request-analyzer/
 ### Plugin not loading
 1. Check that the plugin is properly installed in `~/.openclaw/extensions/`
 2. Verify the configuration is correct
-3. Check OpenClaw logs for error messages
+3. Check logs for error messages
 4. Ensure the plugin is enabled in config
 
 ### Dashboard not accessible
@@ -212,14 +212,14 @@ openclaw-request-analyzer/
 ### No requests being captured
 1. Check that hooks are properly registered
 2. Verify the plugin service started successfully
-3. Look for any error messages in OpenClaw logs
+3. Look for any error messages in logs
 4. Ensure the gateway is processing requests
 
 ### Build errors
 1. Check Node.js version (22+ required)
 2. Run `npm install` to ensure dependencies are installed
 3. Check TypeScript configuration
-4. Verify OpenClaw plugin-sdk compatibility
+4. Verify plugin-sdk compatibility
 
 ## 🤝 Contributing
 
@@ -244,17 +244,16 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- OpenClaw team for the excellent plugin system
-- The OpenClaw community for feedback and testing
+- The community for feedback and testing
 - Contributors who help improve this plugin
 
 ## 📞 Support
 
 - Create an issue on GitHub for bug reports
 - Start a discussion for feature requests
-- Check the [OpenClaw documentation](https://docs.openclaw.ai) for general help
-- Join the OpenClaw community for support
+- Check the documentation for general help
+- Join the community for support
 
 ---
 
-**Made with ❤️ for the OpenClaw community**
+**Made with ❤️ for the community**

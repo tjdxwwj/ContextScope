@@ -17,10 +17,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "openclaw": "^2026.3.9",
-    "sqlite": "^5.1.1",
-    "express": "^5.2.1",
-    "ws": "^8.19.0"
+    "openclaw": "^2026.3.8"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

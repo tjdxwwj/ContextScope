@@ -1,13 +1,18 @@
 /**
  * ContextScope Storage Module
  * 
- * Handles persistent storage of request data using SQLite
+ * Handles persistent storage of request data using JSON files
  */
 
-import Database from 'sqlite';
 import path from 'node:path';
-import fs from 'node:fs/promises';
-import type { PluginLogger } from 'openclaw/plugin-sdk/core';
+import fs from 'node:fs';
+
+interface PluginLogger {
+  debug?: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
 
 export interface RequestData {
   id?: number;
@@ -50,27 +55,35 @@ export interface StorageOptions {
 }
 
 export class RequestAnalyzerStorage {
-  private db: Database.Database | null = null;
+  private dataFile: string;
+  private requests: RequestData[] = [];
   private options: StorageOptions;
   private initialized = false;
+  private nextId = 1;
 
   constructor(options: StorageOptions) {
     this.options = options;
+    this.dataFile = path.join(options.workspaceDir, 'requests.json');
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    const dbPath = path.join(this.options.workspaceDir, 'requests.db');
-    const dbDir = path.dirname(dbPath);
+    const dir = this.options.workspaceDir;
     
     try {
-      await fs.mkdir(dbDir, { recursive: true });
-      this.db = await Database.open(dbPath);
-      
-      await this.createTables();
-      await this.createIndexes();
-      
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // Load existing data
+      if (fs.existsSync(this.dataFile)) {
+        const content = fs.readFileSync(this.dataFile, 'utf-8');
+        const data = JSON.parse(content);
+        this.requests = data.requests || [];
+        this.nextId = data.nextId || (this.requests.length > 0 ? Math.max(...this.requests.map(r => r.id || 0)) + 1 : 1);
+      }
+
       this.initialized = true;
       this.options.logger.info('ContextScope storage initialized');
     } catch (error) {
@@ -79,81 +92,37 @@ export class RequestAnalyzerStorage {
     }
   }
 
-  private async createTables(): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
+  private async persist(): Promise<void> {
+    if (!this.initialized) return;
 
-    await this.db.exec(`
-      CREATE TABLE IF NOT EXISTS requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT NOT NULL CHECK (type IN ('input', 'output')),
-        run_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        prompt TEXT,
-        system_prompt TEXT,
-        history_messages TEXT,
-        assistant_texts TEXT,
-        usage_input INTEGER,
-        usage_output INTEGER,
-        usage_cache_read INTEGER,
-        usage_cache_write INTEGER,
-        usage_total INTEGER,
-        images_count INTEGER,
-        metadata TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-  }
-
-  private async createIndexes(): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
-
-    await this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_requests_run_id ON requests(run_id);
-      CREATE INDEX IF NOT EXISTS idx_requests_session_id ON requests(session_id);
-      CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests(provider);
-      CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model);
-      CREATE INDEX IF NOT EXISTS idx_requests_type ON requests(type);
-    `);
+    try {
+      const data = {
+        requests: this.requests,
+        nextId: this.nextId,
+        lastUpdated: Date.now()
+      };
+      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (error) {
+      this.options.logger.error(`Failed to persist data: ${error}`);
+    }
   }
 
   async captureRequest(data: RequestData): Promise<void> {
     if (!this.initialized) await this.initialize();
-    if (!this.db) throw new Error('Database not initialized');
 
     try {
-      await this.db.run(`
-        INSERT INTO requests (
-          type, run_id, session_id, provider, model, timestamp,
-          prompt, system_prompt, history_messages, assistant_texts,
-          usage_input, usage_output, usage_cache_read, usage_cache_write,
-          usage_total, images_count, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        data.type,
-        data.runId,
-        data.sessionId,
-        data.provider,
-        data.model,
-        data.timestamp,
-        data.prompt || null,
-        data.systemPrompt || null,
-        data.historyMessages ? JSON.stringify(data.historyMessages) : null,
-        data.assistantTexts ? JSON.stringify(data.assistantTexts) : null,
-        data.usage?.input || null,
-        data.usage?.output || null,
-        data.usage?.cacheRead || null,
-        data.usage?.cacheWrite || null,
-        data.usage?.total || null,
-        data.imagesCount || null,
-        data.metadata ? JSON.stringify(data.metadata) : null
-      ]);
+      const requestWithId: RequestData = {
+        ...data,
+        id: this.nextId++
+      };
+
+      this.requests.unshift(requestWithId); // Add to beginning for latest-first order
 
       // Cleanup old requests if needed
-      await this.cleanupOldRequests();
+      this.cleanupOldRequests();
+      
+      // Persist to disk (debounced in production, but simple here)
+      await this.persist();
       
     } catch (error) {
       this.options.logger.error(`Failed to capture request: ${error}`);
@@ -172,80 +141,36 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<RequestData[]> {
     if (!this.initialized) await this.initialize();
-    if (!this.db) throw new Error('Database not initialized');
 
-    const conditions: string[] = [];
-    const params: any[] = [];
+    let filtered = [...this.requests];
 
     if (filters.sessionId) {
-      conditions.push('session_id = ?');
-      params.push(filters.sessionId);
+      filtered = filtered.filter(r => r.sessionId === filters.sessionId);
     }
     if (filters.runId) {
-      conditions.push('run_id = ?');
-      params.push(filters.runId);
+      filtered = filtered.filter(r => r.runId === filters.runId);
     }
     if (filters.provider) {
-      conditions.push('provider = ?');
-      params.push(filters.provider);
+      filtered = filtered.filter(r => r.provider === filters.provider);
     }
     if (filters.model) {
-      conditions.push('model = ?');
-      params.push(filters.model);
+      filtered = filtered.filter(r => r.model === filters.model);
     }
     if (filters.startTime) {
-      conditions.push('timestamp >= ?');
-      params.push(filters.startTime);
+      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
     }
     if (filters.endTime) {
-      conditions.push('timestamp <= ?');
-      params.push(filters.endTime);
+      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
     }
 
-    let query = 'SELECT * FROM requests';
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-    query += ' ORDER BY timestamp DESC';
-    
-    if (filters.limit) {
-      query += ' LIMIT ?';
-      params.push(filters.limit);
-    }
-    if (filters.offset) {
-      query += ' OFFSET ?';
-      params.push(filters.offset);
-    }
+    const offset = filters.offset || 0;
+    const limit = filters.limit || 100;
 
-    const rows = await this.db.all(query, ...params);
-    
-    return rows.map(row => ({
-      id: row.id,
-      type: row.type as 'input' | 'output',
-      runId: row.run_id,
-      sessionId: row.session_id,
-      provider: row.provider,
-      model: row.model,
-      timestamp: row.timestamp,
-      prompt: row.prompt,
-      systemPrompt: row.system_prompt,
-      historyMessages: row.history_messages ? JSON.parse(row.history_messages) : undefined,
-      assistantTexts: row.assistant_texts ? JSON.parse(row.assistant_texts) : undefined,
-      usage: {
-        input: row.usage_input,
-        output: row.usage_output,
-        cacheRead: row.usage_cache_read,
-        cacheWrite: row.usage_cache_write,
-        total: row.usage_total
-      },
-      imagesCount: row.images_count,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined
-    }));
+    return filtered.slice(offset, offset + limit);
   }
 
   async getStats(): Promise<StorageStats> {
     if (!this.initialized) await this.initialize();
-    if (!this.db) throw new Error('Database not initialized');
 
     const now = Date.now();
     const today = new Date();
@@ -253,34 +178,28 @@ export class RequestAnalyzerStorage {
     const weekAgo = new Date(today);
     weekAgo.setDate(weekAgo.getDate() - 7);
 
-    const [
-      totalResult,
-      todayResult,
-      weekResult,
-      sizeResult,
-      oldestResult
-    ] = await Promise.all([
-      this.db.get('SELECT COUNT(*) as count FROM requests'),
-      this.db.get('SELECT COUNT(*) as count FROM requests WHERE timestamp >= ?', today.getTime()),
-      this.db.get('SELECT COUNT(*) as count FROM requests WHERE timestamp >= ?', weekAgo.getTime()),
-      this.getDatabaseSize(),
-      this.db.get('SELECT MIN(timestamp) as oldest FROM requests')
-    ]);
+    const todayTime = today.getTime();
+    const weekAgoTime = weekAgo.getTime();
+
+    const totalRequests = this.requests.length;
+    const todayRequests = this.requests.filter(r => r.timestamp >= todayTime).length;
+    const weekRequests = this.requests.filter(r => r.timestamp >= weekAgoTime).length;
+    const oldestRequest = this.requests.length > 0 ? this.requests[this.requests.length - 1].timestamp : undefined;
 
     return {
-      totalRequests: totalResult?.count || 0,
-      todayRequests: todayResult?.count || 0,
-      weekRequests: weekResult?.count || 0,
-      storageSize: sizeResult,
-      oldestRequest: oldestResult?.oldest,
+      totalRequests,
+      todayRequests,
+      weekRequests,
+      storageSize: this.getDatabaseSize(),
+      oldestRequest,
       newestRequest: now
     };
   }
 
-  private async getDatabaseSize(): Promise<string> {
+  private getDatabaseSize(): string {
     try {
-      const dbPath = path.join(this.options.workspaceDir, 'requests.db');
-      const stats = await fs.stat(dbPath);
+      if (!fs.existsSync(this.dataFile)) return '0 B';
+      const stats = fs.statSync(this.dataFile);
       const bytes = stats.size;
       
       if (bytes < 1024) return `${bytes} B`;
@@ -291,36 +210,20 @@ export class RequestAnalyzerStorage {
     }
   }
 
-  private async cleanupOldRequests(): Promise<void> {
-    if (!this.db) return;
-
+  private cleanupOldRequests(): void {
     const cutoffTime = Date.now() - (this.options.retentionDays * 24 * 60 * 60 * 1000);
     
     // Remove old requests
-    await this.db.run('DELETE FROM requests WHERE timestamp < ?', cutoffTime);
+    this.requests = this.requests.filter(r => r.timestamp >= cutoffTime);
     
     // Remove excess requests if over limit
-    const countResult = await this.db.get('SELECT COUNT(*) as count FROM requests');
-    const currentCount = countResult?.count || 0;
-    
-    if (currentCount > this.options.maxRequests) {
-      const excess = currentCount - this.options.maxRequests;
-      await this.db.run(`
-        DELETE FROM requests 
-        WHERE id IN (
-          SELECT id FROM requests 
-          ORDER BY timestamp ASC 
-          LIMIT ?
-        )
-      `, excess);
+    if (this.requests.length > this.options.maxRequests) {
+      this.requests = this.requests.slice(0, this.options.maxRequests);
     }
   }
 
   async close(): Promise<void> {
-    if (this.db) {
-      await this.db.close();
-      this.db = null;
-      this.initialized = false;
-    }
+    await this.persist();
+    this.initialized = false;
   }
 }

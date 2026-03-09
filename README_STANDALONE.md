@@ -115,11 +115,11 @@ Features:
 GET /plugins/contextscope/api/stats
 
 # Get requests with filters
-GET /plugins/request-analyzer/api/requests?sessionId=xxx&provider=openai&limit=100
+GET /plugins/contextscope/api/requests?sessionId=xxx&provider=openai&limit=100
 
 # Export data
-GET /plugins/request-analyzer/api/export?format=json
-GET /plugins/request-analyzer/api/export?format=csv
+GET /plugins/contextscope/api/export?format=json
+GET /plugins/contextscope/api/export?format=csv
 ```
 
 ## 📊 Configuration Options
@@ -148,23 +148,23 @@ GET /plugins/request-analyzer/api/export?format=csv
 
 ## 🔒 Privacy & Security
 
-- **Local Storage**: All data is stored locally in your OpenClaw workspace
+- **Local Storage**: All data is stored locally in your workspace
 - **Optional Anonymization**: Enable content anonymization to remove emails, phone numbers, API keys
 - **Configurable Retention**: Automatic cleanup of old data based on retention settings
 - **No External Calls**: The plugin doesn't send data to external services
-- **Access Control**: Uses OpenClaw's authentication system
+- **Access Control**: Uses authentication system
 
 ## 🛠️ Development
 
 ### Prerequisites
 - Node.js 22+
-- OpenClaw 2026.3.9+
+- Node.js 18+
 
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/openclaw-request-analyzer.git
-cd openclaw-request-analyzer
+git clone https://github.com/yourname/contextscope.git
+cd contextscope
 
 # Install dependencies
 npm install
@@ -181,7 +181,7 @@ npm test
 ### Plugin not loading
 1. Check that the plugin is properly installed in `~/.openclaw/extensions/`
 2. Verify the configuration is correct
-3. Check OpenClaw logs for error messages
+3. Check logs for error messages
 4. Ensure the plugin is enabled in config
 
 ### Dashboard not accessible
@@ -193,7 +193,7 @@ npm test
 ### No requests being captured
 1. Verify hooks are properly registered
 2. Check service started successfully
-3. Look for errors in OpenClaw logs
+3. Look for errors in logs
 4. Ensure gateway is processing requests
 
 ## 🤝 Contributing

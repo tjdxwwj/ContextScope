@@ -1,13 +1,19 @@
 /**
  * HTTP Handler for ContextScope Dashboard
  * 
- * Serves the web interface and API endpoints
+ * Serves the web interface and API endpoints with advanced visualizations
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { PluginLogger } from 'openclaw/plugin-sdk/core';
 import type { RequestAnalyzerService } from '../service.js';
 import type { PluginConfig } from '../config.js';
+
+interface PluginLogger {
+  debug?: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
 
 interface HandlerParams {
   service: RequestAnalyzerService;
@@ -23,7 +29,6 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     const path = url.pathname;
 
     try {
-      // API endpoints
       if (path === '/plugins/contextscope/api/stats') {
         return await handleStats(req, res);
       }
@@ -32,21 +37,22 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleRequests(req, res, url);
       }
 
+      if (path === '/plugins/contextscope/api/analysis') {
+        return await handleAnalysis(req, res, url);
+      }
+
+      if (path === '/plugins/contextscope/api/session') {
+        return await handleSessionAnalysis(req, res, url);
+      }
+
       if (path === '/plugins/contextscope/api/export') {
         return await handleExport(req, res, url);
       }
 
-      // Dashboard
       if (path === '/plugins/contextscope' || path === '/plugins/contextscope/') {
         return await handleDashboard(req, res);
       }
 
-      // Static assets
-      if (path.startsWith('/plugins/contextscope/assets/')) {
-        return await handleAsset(req, res, path);
-      }
-
-      // 404 for unknown paths
       res.statusCode = 404;
       res.end('Not Found');
       return true;
@@ -115,17 +121,89 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({
-        requests,
-        total: requests.length,
-        filters
-      }));
+      res.end(JSON.stringify({ requests, total: requests.length, filters }));
       return true;
     } catch (error) {
       logger.error(`Failed to get requests: ${error}`);
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to get requests' }));
+      return true;
+    }
+  }
+
+  async function handleAnalysis(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const runId = url.searchParams.get('runId');
+      if (!runId) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'runId parameter is required' }));
+        return true;
+      }
+
+      const analysis = await service.getDetailedAnalysis(runId);
+      
+      if (!analysis) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Analysis not found for runId' }));
+        return true;
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(analysis));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get analysis: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get analysis' }));
+      return true;
+    }
+  }
+
+  async function handleSessionAnalysis(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const sessionId = url.searchParams.get('sessionId');
+      if (!sessionId) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'sessionId parameter is required' }));
+        return true;
+      }
+
+      const analysis = await service.getSessionAnalysis(sessionId);
+      
+      if (!analysis) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Session analysis not found' }));
+        return true;
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(analysis));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get session analysis: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get session analysis' }));
       return true;
     }
   }
@@ -185,37 +263,12 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     return true;
   }
 
-  async function handleAsset(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
-    // For now, just return 404 for assets
-    // In a full implementation, you'd serve CSS, JS, etc.
-    res.statusCode = 404;
-    res.end('Asset not found');
-    return true;
-  }
-
   function convertToCSV(requests: any[]): string {
-    const headers = [
-      'ID', 'Type', 'Run ID', 'Session ID', 'Provider', 'Model', 'Timestamp',
-      'Input Tokens', 'Output Tokens', 'Cache Read', 'Cache Write', 'Total Tokens',
-      'Images Count'
-    ];
-
+    const headers = ['ID', 'Type', 'Run ID', 'Session ID', 'Provider', 'Model', 'Timestamp', 'Input Tokens', 'Output Tokens', 'Total Tokens'];
     const rows = requests.map(req => [
-      req.id || '',
-      req.type || '',
-      req.runId || '',
-      req.sessionId || '',
-      req.provider || '',
-      req.model || '',
-      new Date(req.timestamp).toISOString(),
-      req.usage?.input || '',
-      req.usage?.output || '',
-      req.usage?.cacheRead || '',
-      req.usage?.cacheWrite || '',
-      req.usage?.total || '',
-      req.imagesCount || ''
+      req.id || '', req.type || '', req.runId || '', req.sessionId || '', req.provider || '', req.model || '',
+      new Date(req.timestamp).toISOString(), req.usage?.input || '', req.usage?.output || '', req.usage?.total || ''
     ]);
-
     return [headers, ...rows].map(row => row.join(',')).join('\n');
   }
 
@@ -229,323 +282,251 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ContextScope</title>
+    <title>ContextScope - Request Context Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
-            --bg: ${theme === 'dark' ? '#1a1a1a' : '#ffffff'};
-            --text: ${theme === 'dark' ? '#e0e0e0' : '#333333'};
-            --card: ${theme === 'dark' ? '#2a2a2a' : '#f5f5f5'};
-            --border: ${theme === 'dark' ? '#404040' : '#dddddd'};
-            --primary: #007acc;
-            --success: #28a745;
-            --warning: #ffc107;
-            --danger: #dc3545;
+            --bg: ${theme === 'dark' ? '#0d1117' : '#ffffff'};
+            --bg-secondary: ${theme === 'dark' ? '#161b22' : '#f6f8fa'};
+            --text: ${theme === 'dark' ? '#c9d1d9' : '#24292f'};
+            --text-secondary: ${theme === 'dark' ? '#8b949e' : '#57606a'};
+            --card: ${theme === 'dark' ? '#161b22' : '#ffffff'};
+            --border: ${theme === 'dark' ? '#30363d' : '#d0d7de'};
+            --primary: #58a6ff;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
         }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            line-height: 1.6;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid var(--border);
-        }
-        
-        .header h1 {
-            font-size: 2rem;
-            font-weight: 600;
-        }
-        
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .status-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: var(--success);
-            animation: pulse 2s infinite;
-        }
-        
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stat-card {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px;
-            text-align: center;
-        }
-        
-        .stat-value {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: var(--primary);
-            margin-bottom: 5px;
-        }
-        
-        .stat-label {
-            font-size: 0.9rem;
-            color: var(--text);
-            opacity: 0.8;
-        }
-        
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        
-        .btn {
-            padding: 8px 16px;
-            border: 1px solid var(--border);
-            background: var(--card);
-            color: var(--text);
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.9rem;
-            transition: all 0.2s;
-        }
-        
-        .btn:hover {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
-        }
-        
-        .requests-table {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        
-        .table-header {
-            padding: 15px 20px;
-            background: var(--bg);
-            border-bottom: 1px solid var(--border);
-            font-weight: 600;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: var(--text);
-            opacity: 0.6;
-        }
-        
-        .error {
-            text-align: center;
-            padding: 40px;
-            color: var(--danger);
-        }
-        
-        .refresh-info {
-            text-align: center;
-            margin-top: 20px;
-            font-size: 0.8rem;
-            color: var(--text);
-            opacity: 0.6;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+        .header h1 { font-size: 1.8rem; font-weight: 600; }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: rgba(63, 185, 80, 0.15); color: var(--success); border-radius: 100px; font-size: 0.85rem; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+        .stat-value { font-size: 2rem; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+        .stat-label { font-size: 0.85rem; color: var(--text-secondary); }
+        .controls { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .btn { padding: 8px 16px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text); border-radius: 6px; cursor: pointer; font-size: 0.9rem; transition: all 0.2s; }
+        .btn:hover { background: var(--primary); color: white; border-color: var(--primary); }
+        .btn-primary { background: var(--primary); color: white; border-color: var(--primary); }
+        .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px; }
+        @media (max-width: 1024px) { .grid-2 { grid-template-columns: 1fr; } }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+        .card-header { padding: 16px 20px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); font-weight: 600; }
+        .card-body { padding: 20px; }
+        .requests-list { max-height: 500px; overflow-y: auto; }
+        .request-item { padding: 16px 20px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.2s; }
+        .request-item:hover { background: var(--bg-secondary); }
+        .request-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .request-provider { font-weight: 600; color: var(--primary); }
+        .request-time { font-size: 0.85rem; color: var(--text-secondary); }
+        .request-details { display: flex; gap: 16px; font-size: 0.85rem; color: var(--text-secondary); }
+        .request-details strong { color: var(--text); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 100px; font-size: 0.75rem; font-weight: 500; }
+        .badge-input { background: rgba(88, 166, 255, 0.15); color: var(--primary); }
+        .badge-output { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+        .loading, .error, .empty-state { text-align: center; padding: 40px; }
+        .error { color: var(--danger); }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.7); display: none; align-items: center; justify-content: center; z-index: 1000; }
+        .modal-overlay.active { display: flex; }
+        .modal { background: var(--card); border: 1px solid var(--border); border-radius: 12px; max-width: 900px; width: 90%; max-height: 90vh; overflow-y: auto; }
+        .modal-header { padding: 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .modal-title { font-size: 1.2rem; font-weight: 600; }
+        .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 1.5rem; cursor: pointer; }
+        .modal-body { padding: 20px; }
+        .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+        .tab { padding: 12px 20px; cursor: pointer; border-bottom: 2px solid transparent; }
+        .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .heatmap-container { display: flex; flex-direction: column; gap: 4px; }
+        .heatmap-row { display: flex; gap: 4px; min-height: 40px; }
+        .heatmap-cell { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 600; border-radius: 4px; cursor: pointer; position: relative; }
+        .heatmap-cell:hover { transform: scale(1.05); z-index: 10; }
+        .timeline-point { position: relative; padding-left: 30px; margin-bottom: 20px; }
+        .timeline-point::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+        .timeline-point::after { content: ''; position: absolute; left: 4px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--primary); }
+        .timeline-content { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+        .graph-nodes { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; }
+        .graph-node { background: var(--bg-secondary); border: 2px solid var(--border); border-radius: 8px; padding: 12px 16px; min-width: 150px; text-align: center; }
+        .graph-node.success { border-color: var(--success); }
+        .graph-node.error { border-color: var(--danger); }
+        .insight-item { padding: 16px; border-radius: 6px; margin-bottom: 12px; border-left: 4px solid; }
+        .insight-warning { background: rgba(210, 153, 34, 0.1); border-left-color: var(--warning); }
+        .insight-info { background: rgba(88, 166, 255, 0.1); border-left-color: var(--primary); }
+        .insight-optimization { background: rgba(188, 140, 255, 0.1); border-left-color: #bc8cff; }
+        .progress-bar { height: 8px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, var(--primary), #bc8cff); }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🔍 ContextScope</h1>
-            <div class="status">
-                <div class="status-indicator"></div>
-                <span>Live</span>
-            </div>
+            <div class="status-badge"><div class="status-dot"></div>Live</div>
         </div>
-        
-        <div class="stats-grid" id="stats-grid">
-            <div class="loading">Loading statistics...</div>
-        </div>
-        
+        <div class="stats-grid" id="stats-grid"><div class="loading">Loading...</div></div>
         <div class="controls">
-            <button class="btn" onclick="refreshData()">🔄 Refresh</button>
+            <button class="btn btn-primary" onclick="refreshData()">🔄 Refresh</button>
             <button class="btn" onclick="exportData('json')">📥 Export JSON</button>
             <button class="btn" onclick="exportData('csv')">📊 Export CSV</button>
-            <button class="btn" onclick="clearFilters()">🧹 Clear Filters</button>
         </div>
-        
-        <div class="requests-table">
-            <div class="table-header">Recent Requests</div>
-            <div id="requests-content">
-                <div class="loading">Loading requests...</div>
+        <div class="grid-2">
+            <div class="card"><div class="card-header">📊 Token Distribution</div><div class="card-body"><canvas id="tokenChart" height="200"></canvas></div></div>
+            <div class="card"><div class="card-header">📈 Hourly Requests</div><div class="card-body"><canvas id="hourlyChart" height="200"></canvas></div></div>
+        </div>
+        <div class="card"><div class="card-header">📋 Recent Requests</div><div class="requests-list" id="requests-list"><div class="loading">Loading...</div></div></div>
+    </div>
+    <div class="modal-overlay" id="analysis-modal">
+        <div class="modal">
+            <div class="modal-header"><h2 class="modal-title" id="modal-title">Analysis</h2><button class="modal-close" onclick="closeModal()">&times;</button></div>
+            <div class="modal-body">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('token')">Token Analysis</div>
+                    <div class="tab" onclick="switchTab('heatmap')">Heatmap</div>
+                    <div class="tab" onclick="switchTab('timeline')">Timeline</div>
+                    <div class="tab" onclick="switchTab('graph')">Dependency Graph</div>
+                    <div class="tab" onclick="switchTab('insights')">Insights</div>
+                </div>
+                <div id="tab-token" class="tab-content active"><canvas id="tokenDetailChart" height="300"></canvas></div>
+                <div id="tab-heatmap" class="tab-content"><div class="heatmap-container" id="heatmap-container"></div></div>
+                <div id="tab-timeline" class="tab-content"><div id="timeline-container"></div></div>
+                <div id="tab-graph" class="tab-content"><div class="graph-nodes" id="graph-nodes"></div></div>
+                <div id="tab-insights" class="tab-content" id="insights-container"></div>
             </div>
         </div>
-        
-        <div class="refresh-info" id="refresh-info">
-            ${autoRefresh ? `Auto-refreshing every ${refreshInterval / 1000} seconds` : 'Auto-refresh disabled'}
-        </div>
     </div>
-
     <script>
-        let currentFilters = {};
-        let refreshTimer = null;
+        let currentFilters = {}, refreshTimer = null, tokenChart = null, hourlyChart = null, tokenDetailChart = null, currentAnalysis = null;
 
         async function loadStats() {
             try {
                 const response = await fetch('/plugins/contextscope/api/stats');
                 const data = await response.json();
-                
-                if (data.error) {
-                    document.getElementById('stats-grid').innerHTML = \`
-                        <div class="error">Error loading statistics: \${data.error}</div>
-                    \`;
-                    return;
-                }
+                if (data.error) { document.getElementById('stats-grid').innerHTML = '<div class="error">Error: ' + data.error + '</div>'; return; }
+                const stats = data.stats, storage = data.storage;
+                document.getElementById('stats-grid').innerHTML = 
+                    '<div class="stat-card"><div class="stat-value">' + stats.totalRequests.toLocaleString() + '</div><div class="stat-label">Total Requests</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">' + stats.todayRequests + '</div><div class="stat-label">Today</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">' + stats.weekRequests + '</div><div class="stat-label">This Week</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">' + stats.averageTokens.toLocaleString() + '</div><div class="stat-label">Avg Tokens</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">$' + stats.totalCost.toFixed(2) + '</div><div class="stat-label">Est. Cost</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">' + storage.storageSize + '</div><div class="stat-label">Storage</div></div>';
+                updateCharts(stats);
+            } catch (error) { document.getElementById('stats-grid').innerHTML = '<div class="error">Failed: ' + error.message + '</div>'; }
+        }
 
-                const stats = data.stats;
-                document.getElementById('stats-grid').innerHTML = \`
-                    <div class="stat-card">
-                        <div class="stat-value">\${stats.totalRequests.toLocaleString()}</div>
-                        <div class="stat-label">Total Requests</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">\${stats.todayRequests}</div>
-                        <div class="stat-label">Today</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">\${stats.weekRequests}</div>
-                        <div class="stat-label">This Week</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">\${stats.averageTokens.toLocaleString()}</div>
-                        <div class="stat-label">Avg Tokens</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">$\${stats.totalCost.toFixed(2)}</div>
-                        <div class="stat-label">Est. Cost</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">\${stats.storageSize}</div>
-                        <div class="stat-label">Storage</div>
-                    </div>
-                \`;
-            } catch (error) {
-                document.getElementById('stats-grid').innerHTML = \`
-                    <div class="error">Failed to load statistics: \${error.message}</div>
-                \`;
-            }
+        function updateCharts(stats) {
+            const tokenCtx = document.getElementById('tokenChart').getContext('2d');
+            if (tokenChart) tokenChart.destroy();
+            tokenChart = new Chart(tokenCtx, { type: 'doughnut', data: { labels: Object.keys(stats.byProvider), datasets: [{ data: Object.values(stats.byProvider), backgroundColor: ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#36A2EB','#FFCE56','#4BC0C0'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: getComputedStyle(document.body).getPropertyValue('--text') } } } } });
+            const hourlyCtx = document.getElementById('hourlyChart').getContext('2d');
+            if (hourlyChart) hourlyChart.destroy();
+            hourlyChart = new Chart(hourlyCtx, { type: 'bar', data: { labels: Array.from({length: 24}, (_, i) => i + ':00'), datasets: [{ label: 'Requests', data: stats.hourlyDistribution, backgroundColor: '#58a6ff', borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: getComputedStyle(document.body).getPropertyValue('--text-secondary') }, grid: { color: getComputedStyle(document.body).getPropertyValue('--border') } }, x: { ticks: { color: getComputedStyle(document.body).getPropertyValue('--text-secondary') }, grid: { display: false } } }, plugins: { legend: { display: false } } } });
         }
 
         async function loadRequests() {
             try {
-                const params = new URLSearchParams(currentFilters);
-                const response = await fetch(\`/plugins/contextscope/api/requests?\${params}\`);
+                const params = new URLSearchParams({ ...currentFilters, limit: 20 });
+                const response = await fetch('/plugins/contextscope/api/requests?' + params);
                 const data = await response.json();
-                
-                if (data.error) {
-                    document.getElementById('requests-content').innerHTML = \`
-                        <div class="error">Error loading requests: \${data.error}</div>
-                    \`;
-                    return;
-                }
-
+                if (data.error) { document.getElementById('requests-list').innerHTML = '<div class="error">Error: ' + data.error + '</div>'; return; }
                 const requests = data.requests;
-                if (requests.length === 0) {
-                    document.getElementById('requests-content').innerHTML = \`
-                        <div class="loading">No requests found</div>
-                    \`;
-                    return;
-                }
+                if (requests.length === 0) { document.getElementById('requests-list').innerHTML = '<div class="empty-state">No requests</div>'; return; }
+                let html = '';
+                requests.forEach(req => {
+                    const time = new Date(req.timestamp).toLocaleString();
+                    const usage = req.usage || {};
+                    html += '<div class="request-item" onclick="showAnalysis(\\'' + req.runId + '\\')"><div class="request-header"><span class="request-provider">' + req.provider + ' / ' + req.model + '</span><span class="request-time">' + time + '</span></div><div class="request-details"><span class="badge badge-' + req.type + '">' + (req.type === 'input' ? 'Input' : 'Output') + '</span><span>Token: <strong>' + (usage.total?.toLocaleString() || 0) + '</strong></span><span>In: <strong>' + (usage.input?.toLocaleString() || 0) + '</strong></span><span>Out: <strong>' + (usage.output?.toLocaleString() || 0) + '</strong></span></div></div>';
+                });
+                document.getElementById('requests-list').innerHTML = html;
+            } catch (error) { document.getElementById('requests-list').innerHTML = '<div class="error">Failed: ' + error.message + '</div>'; }
+        }
 
-                let html = '<div style="padding: 20px;">';
-                requests.forEach(request => {
-                    const time = new Date(request.timestamp).toLocaleString();
-                    const usage = request.usage || {};
-                    html += \`
-                        <div style="border-bottom: 1px solid var(--border); padding: 15px 0;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <strong>\${request.provider} / \${request.model}</strong>
-                                <span style="font-size: 0.9rem; opacity: 0.7;">\${time}</span>
-                            </div>
-                            <div style="display: flex; gap: 15px; font-size: 0.9rem;">
-                                <span>Type: <strong>\${request.type}</strong></span>
-                                <span>Tokens: <strong>\${usage.total?.toLocaleString() || 0}</strong></span>
-                                <span>Session: <code>\${request.sessionId}</code></span>
-                            </div>
-                        </div>
-                    \`;
+        async function showAnalysis(runId) {
+            try {
+                const response = await fetch('/plugins/contextscope/api/analysis?runId=' + runId);
+                const analysis = await response.json();
+                if (analysis.error) { alert('Failed: ' + analysis.error); return; }
+                currentAnalysis = analysis;
+                document.getElementById('modal-title').textContent = 'Analysis: ' + analysis.provider + ' / ' + analysis.model;
+                const tokenDetailCtx = document.getElementById('tokenDetailChart').getContext('2d');
+                if (tokenDetailChart) tokenDetailChart.destroy();
+                tokenDetailChart = new Chart(tokenDetailCtx, { type: 'bar', data: { labels: analysis.tokenBreakdown.labels, datasets: [{ label: 'Tokens', data: analysis.tokenBreakdown.values, backgroundColor: analysis.tokenBreakdown.colors, borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: getComputedStyle(document.body).getPropertyValue('--text-secondary') }, grid: { color: getComputedStyle(document.body).getPropertyValue('--border') } }, x: { ticks: { color: getComputedStyle(document.body).getPropertyValue('--text-secondary') }, grid: { display: false } } } } });
+                renderHeatmap(analysis.heatmap);
+                renderTimeline(analysis.timeline);
+                renderDependencyGraph(analysis.dependencyGraph);
+                renderInsights(analysis.insights);
+                document.getElementById('analysis-modal').classList.add('active');
+                switchTab('token');
+            } catch (error) { alert('Failed: ' + error.message); }
+        }
+
+        function renderHeatmap(heatmap) {
+            const container = document.getElementById('heatmap-container');
+            if (!heatmap.messages || heatmap.messages.length === 0) { container.innerHTML = '<div class="empty-state">No message data</div>'; return; }
+            const rows = [];
+            for (let i = 0; i < heatmap.messages.length; i += 10) rows.push(heatmap.messages.slice(i, i + 10));
+            let html = '';
+            rows.forEach(row => {
+                html += '<div class="heatmap-row">';
+                row.forEach(msg => {
+                    const intensity = msg.impact / heatmap.maxImpact;
+                    const r = Math.round(88 + (210 - 88) * intensity);
+                    const g = Math.round(166 + (153 - 166) * intensity);
+                    const b = Math.round(255 + (34 - 255) * intensity);
+                    html += '<div class="heatmap-cell" style="background: rgb(' + r + ',' + g + ',' + b + ');" title="Role: ' + msg.role + ', Tokens: ' + msg.tokens + ', Impact: ' + msg.impact + '">' + msg.tokens + '</div>';
                 });
                 html += '</div>';
-                
-                document.getElementById('requests-content').innerHTML = html;
-            } catch (error) {
-                document.getElementById('requests-content').innerHTML = \`
-                    <div class="error">Failed to load requests: \${error.message}</div>
-                \`;
-            }
+            });
+            container.innerHTML = html;
         }
 
-        function refreshData() {
-            loadStats();
-            loadRequests();
-            updateRefreshInfo();
+        function renderTimeline(timeline) {
+            const container = document.getElementById('timeline-container');
+            if (!timeline.points || timeline.points.length === 0) { container.innerHTML = '<div class="empty-state">No timeline data</div>'; return; }
+            let html = '';
+            timeline.points.forEach(point => {
+                const time = new Date(point.timestamp).toLocaleString();
+                const cls = point.utilization > 0.9 ? 'danger' : point.utilization > 0.7 ? 'warning' : '';
+                html += '<div class="timeline-point ' + cls + '"><div class="timeline-content"><div style="font-size:0.8rem;color:var(--text-secondary);">' + time + '</div><div style="display:flex;gap:16px;font-size:0.85rem;"><span>Tokens: <strong>' + point.tokens.toLocaleString() + '</strong></span><span>Messages: <strong>' + point.messages + '</strong></span><span>Utilization: <strong>' + Math.round(point.utilization * 100) + '%</strong></span></div><div class="progress-bar" style="margin-top:8px;"><div class="progress-fill" style="width:' + Math.min(100, point.utilization * 100) + '%"></div></div></div></div>';
+            });
+            container.innerHTML = html;
         }
 
-        function exportData(format) {
-            const params = new URLSearchParams(currentFilters);
-            window.open(\`/plugins/contextscope/api/export?format=\${format}&\${params}\`, '_blank');
+        function renderDependencyGraph(graph) {
+            const container = document.getElementById('graph-nodes');
+            if (!graph.nodes || graph.nodes.length === 0) { container.innerHTML = '<div class="empty-state">No tool call data</div>'; return; }
+            let html = '';
+            graph.nodes.forEach(node => {
+                html += '<div class="graph-node ' + node.status + '"><div style="font-weight:600;margin-bottom:8px;">' + node.label + '</div><div style="font-size:0.8rem;color:var(--text-secondary);"><div>Tokens: ' + node.tokens.toLocaleString() + '</div><div>Duration: ' + node.duration + 'ms</div><div>Status: ' + (node.status === 'success' ? '✅' : node.status === 'error' ? '❌' : '⏳') + '</div></div></div>';
+            });
+            container.innerHTML = html;
         }
 
-        function clearFilters() {
-            currentFilters = {};
-            refreshData();
+        function renderInsights(insights) {
+            const container = document.getElementById('insights-container');
+            if (!insights || insights.length === 0) { container.innerHTML = '<div class="empty-state">No insights</div>'; return; }
+            let html = '';
+            insights.forEach(insight => {
+                const cls = insight.type === 'warning' ? 'insight-warning' : insight.type === 'optimization' ? 'insight-optimization' : 'insight-info';
+                const icon = insight.type === 'warning' ? '⚠️' : insight.type === 'optimization' ? '💡' : 'ℹ️';
+                html += '<div class="insight-item ' + cls + '"><div style="font-weight:600;margin-bottom:4px;">' + icon + ' ' + insight.title + '</div><div style="font-size:0.9rem;color:var(--text-secondary);">' + insight.description + '</div></div>';
+            });
+            container.innerHTML = html;
         }
 
-        function updateRefreshInfo() {
-            const now = new Date().toLocaleTimeString();
-            document.getElementById('refresh-info').textContent = \`
-                Last updated: \${now} | \${${autoRefresh ? \`Auto-refreshing every ${refreshInterval / 1000} seconds\` : 'Auto-refresh disabled'}}
-            \`;
-        }
-
-        // Initialize
+        function closeModal() { document.getElementById('analysis-modal').classList.remove('active'); currentAnalysis = null; }
+        function switchTab(tabName) { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active')); event.target.classList.add('active'); document.getElementById('tab-' + tabName).classList.add('active'); }
+        function refreshData() { loadStats(); loadRequests(); }
+        function exportData(format) { window.open('/plugins/contextscope/api/export?format=' + format, '_blank'); }
+        document.getElementById('analysis-modal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
         refreshData();
-        
-        // Setup auto-refresh
-        ${autoRefresh ? \`
-        if (refreshTimer) clearInterval(refreshTimer);
-        refreshTimer = setInterval(refreshData, ${refreshInterval});
-        \` : ''}
+        ${autoRefresh ? 'if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refreshData, ' + refreshInterval + ');' : ''}
     </script>
 </body>
 </html>`;

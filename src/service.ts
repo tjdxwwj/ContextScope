@@ -4,9 +4,16 @@
  * Core service that handles request analysis, statistics, and alerts
  */
 
-import type { PluginLogger } from 'openclaw/plugin-sdk/core';
 import type { RequestAnalyzerStorage } from './storage.js';
 import type { PluginConfig } from './config.js';
+import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
+
+interface PluginLogger {
+  debug?: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
 
 export interface AnalysisStats {
   totalRequests: number;
@@ -33,10 +40,70 @@ export interface AlertContext {
   model: string;
 }
 
+export interface TokenVisualization {
+  labels: string[];
+  values: number[];
+  colors: string[];
+  total: number;
+}
+
+export interface HeatmapData {
+  messages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    tokens: number;
+    impact: number;
+    timestamp: number;
+  }>;
+  maxImpact: number;
+}
+
+export interface TimelineData {
+  points: Array<{
+    timestamp: number;
+    tokens: number;
+    messages: number;
+    utilization: number;
+    summaryApplied: boolean;
+  }>;
+  contextWindow: number;
+}
+
+export interface DependencyGraphData {
+  nodes: Array<{
+    id: string;
+    label: string;
+    type: 'tool' | 'response' | 'llm';
+    duration: number;
+    tokens: number;
+    status: 'success' | 'error' | 'pending';
+  }>;
+  edges: Array<{
+    source: string;
+    target: string;
+    weight: number;
+  }>;
+}
+
+export interface DetailedAnalysis {
+  runId: string;
+  sessionId: string;
+  provider: string;
+  model: string;
+  timestamp: number;
+  tokenBreakdown: TokenVisualization;
+  heatmap: HeatmapData;
+  timeline: TimelineData;
+  dependencyGraph: DependencyGraphData;
+  insights: AnalysisInsight[];
+}
+
 export class RequestAnalyzerService {
   private storage: RequestAnalyzerStorage;
   private config: PluginConfig;
   private logger: PluginLogger;
+  private analyzer: ContextAnalyzer;
 
   constructor(params: {
     storage: RequestAnalyzerStorage;
@@ -46,6 +113,7 @@ export class RequestAnalyzerService {
     this.storage = params.storage;
     this.config = params.config;
     this.logger = params.logger;
+    this.analyzer = new ContextAnalyzer();
   }
 
   async captureRequest(data: any): Promise<void> {
@@ -163,8 +231,143 @@ export class RequestAnalyzerService {
     return await this.storage.getStats();
   }
 
+  async getDetailedAnalysis(runId: string): Promise<DetailedAnalysis | null> {
+    try {
+      // Get the main request
+      const requests = await this.storage.getRequests({ runId, limit: 100 });
+      if (requests.length === 0) return null;
+
+      const mainRequest = requests.find(r => r.type === 'input') || requests[0];
+      
+      // Run analysis
+      const analysis = this.analyzer.analyzeRequest(mainRequest, requests);
+
+      // Convert to visualization format
+      const tokenBreakdown: TokenVisualization = {
+        labels: ['系统提示', '历史消息', '当前提示', '工具响应', '输出', '缓存读取', '缓存写入'],
+        values: [
+          analysis.tokenBreakdown.systemPrompt,
+          analysis.tokenBreakdown.historyMessages,
+          analysis.tokenBreakdown.currentPrompt,
+          analysis.tokenBreakdown.toolResponses,
+          analysis.tokenBreakdown.output,
+          analysis.tokenBreakdown.cacheRead,
+          analysis.tokenBreakdown.cacheWrite
+        ],
+        colors: [
+          '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40', '#C9CBCF'
+        ],
+        total: analysis.tokenBreakdown.totalInput + analysis.tokenBreakdown.output
+      };
+
+      const heatmap: HeatmapData = {
+        messages: analysis.messageImpacts.map(m => ({
+          id: m.messageId,
+          role: m.role,
+          content: m.content,
+          tokens: m.tokenCount,
+          impact: m.impactScore,
+          timestamp: m.timestamp
+        })),
+        maxImpact: Math.max(...analysis.messageImpacts.map(m => m.impactScore), 1)
+      };
+
+      const timeline: TimelineData = {
+        points: analysis.contextEvolution.map(e => ({
+          timestamp: e.timestamp,
+          tokens: e.totalTokens,
+          messages: e.messageCount,
+          utilization: e.windowUtilization,
+          summaryApplied: e.summaryApplied
+        })),
+        contextWindow: this.getModelContextWindow(mainRequest.model)
+      };
+
+      const dependencyGraph: DependencyGraphData = {
+        nodes: analysis.dependencyGraph.nodes.map(n => ({
+          id: n.id,
+          label: n.name,
+          type: n.name.includes('response') ? 'response' : 'tool',
+          duration: n.duration,
+          tokens: n.tokensUsed,
+          status: n.status
+        })),
+        edges: analysis.dependencyGraph.edges.map(e => ({
+          source: e.from,
+          target: e.to,
+          weight: e.weight
+        }))
+      };
+
+      return {
+        runId: analysis.runId,
+        sessionId: analysis.sessionId,
+        provider: mainRequest.provider,
+        model: mainRequest.model,
+        timestamp: mainRequest.timestamp,
+        tokenBreakdown,
+        heatmap,
+        timeline,
+        dependencyGraph,
+        insights: analysis.insights
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get detailed analysis: ${error}`);
+      return null;
+    }
+  }
+
+  async getSessionAnalysis(sessionId: string): Promise<{
+    totalTokens: number;
+    totalRequests: number;
+    averageTokensPerRequest: number;
+    topModels: Array<{ model: string; count: number }>;
+    tokenTrend: Array<{ timestamp: number; tokens: number }>;
+  } | null> {
+    try {
+      const requests = await this.storage.getRequests({ sessionId, limit: 1000 });
+      if (requests.length === 0) return null;
+
+      const totalTokens = requests.reduce((sum, r) => sum + (r.usage?.total || 0), 0);
+      const modelCounts: Record<string, number> = {};
+
+      requests.forEach(r => {
+        modelCounts[r.model] = (modelCounts[r.model] || 0) + 1;
+      });
+
+      const topModels = Object.entries(modelCounts)
+        .map(([model, count]) => ({ model, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+      // Group by hour for trend
+      const hourlyTokens: Record<number, number> = {};
+      requests.forEach(r => {
+        const hour = Math.floor(r.timestamp / (60 * 60 * 1000));
+        hourlyTokens[hour] = (hourlyTokens[hour] || 0) + (r.usage?.total || 0);
+      });
+
+      const tokenTrend = Object.entries(hourlyTokens)
+        .map(([hour, tokens]) => ({
+          timestamp: parseInt(hour) * 60 * 60 * 1000,
+          tokens
+        }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+      return {
+        totalTokens,
+        totalRequests: requests.length,
+        averageTokensPerRequest: Math.round(totalTokens / requests.length),
+        topModels,
+        tokenTrend
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get session analysis: ${error}`);
+      return null;
+    }
+  }
+
   private anonymizeContent(data: any): any {
-    // Simple anonymization - in production, use more sophisticated methods
     const anonymized = { ...data };
     
     if (anonymized.prompt) {
@@ -185,7 +388,6 @@ export class RequestAnalyzerService {
   }
 
   private anonymizeText(text: string): string {
-    // Replace emails, phone numbers, API keys, etc.
     return text
       .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[EMAIL]')
       .replace(/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, '[PHONE]')
@@ -199,10 +401,8 @@ export class RequestAnalyzerService {
   }
 
   private estimateCost(usage: any, provider: string, model: string): number {
-    // Simplified cost estimation - in production, use actual pricing
     const totalTokens = usage.total || (usage.input || 0) + (usage.output || 0);
     
-    // Rough cost estimates per 1K tokens (USD)
     const costPer1K: Record<string, number> = {
       'gpt-4': 0.06,
       'gpt-4-turbo': 0.03,
@@ -210,6 +410,8 @@ export class RequestAnalyzerService {
       'claude-3-opus': 0.075,
       'claude-3-sonnet': 0.015,
       'claude-3-haiku': 0.003,
+      'qwen': 0.008,
+      'qwen2': 0.004,
       'default': 0.01
     };
 
@@ -217,5 +419,25 @@ export class RequestAnalyzerService {
     const cost = (totalTokens / 1000) * costPer1K[modelKey];
     
     return cost;
+  }
+
+  private getModelContextWindow(model: string): number {
+    const modelLower = model.toLowerCase();
+    const windows: Record<string, number> = {
+      'gpt-4': 8192,
+      'gpt-4-turbo': 128000,
+      'gpt-3.5-turbo': 16385,
+      'claude-3': 200000,
+      'qwen': 32768,
+      'qwen2': 128000,
+      'default': 8192
+    };
+
+    for (const [key, value] of Object.entries(windows)) {
+      if (modelLower.includes(key)) {
+        return value;
+      }
+    }
+    return windows['default'];
   }
 }
