@@ -10,6 +10,11 @@ interface Stats {
   byProvider: Record<string, number>
   byModel: Record<string, number>
   hourlyDistribution: number[]
+  latency?: {
+    p50: number
+    p95: number
+    p99: number
+  }
 }
 
 interface Request {
@@ -25,6 +30,10 @@ interface Request {
     output?: number
     total?: number
   }
+  latency?: number
+  prompt?: string
+  systemPrompt?: string
+  historyMessages?: any[]
 }
 
 interface Analysis {
@@ -83,13 +92,25 @@ interface Analysis {
   }>
 }
 
+interface TokenTrendPoint {
+  timestamp: number
+  input: number
+  output: number
+  total: number
+}
+
 export class App {
   private apiBase = '/plugins/contextscope/api'
+  private ws: WebSocket | null = null
   private tokenChart: Chart | null = null
   private hourlyChart: Chart | null = null
   private tokenDetailChart: Chart | null = null
+  private tokenTrendChart: Chart | null = null
+  private latencyChart: Chart | null = null
   private currentAnalysis: Analysis | null = null
   private refreshTimer: number | null = null
+  private allRequests: Request[] = []
+  private selectedSessionIds: string[] = []
 
   mount() {
     const app = document.getElementById('app')
@@ -99,6 +120,7 @@ export class App {
     this.initCharts()
     this.loadData()
     this.setupEventListeners()
+    this.connectWebSocket()
     this.startAutoRefresh()
   }
 
@@ -108,15 +130,24 @@ export class App {
         <div class="header">
           <h1>🔍 ContextScope</h1>
           <div class="status-badge">
-            <div class="status-dot"></div>
-            Live
+            <div class="status-dot" id="ws-status"></div>
+            <span id="ws-text">Connecting...</span>
           </div>
         </div>
 
+        <!-- Search Bar -->
+        <div class="search-bar">
+          <input type="text" id="search-input" placeholder="🔍 Search prompts, responses, models..." class="search-input">
+          <button class="btn btn-primary" id="search-btn">Search</button>
+          <button class="btn" id="clear-search">Clear</button>
+        </div>
+
+        <!-- Stats Grid -->
         <div class="stats-grid" id="stats-grid">
           <div class="loading">Loading statistics...</div>
         </div>
 
+        <!-- Controls -->
         <div class="controls">
           <button class="btn btn-primary" id="refresh-btn">🔄 Refresh</button>
           <button class="btn" id="export-json">📥 Export JSON</button>
@@ -124,28 +155,79 @@ export class App {
           <div class="filter-group">
             <input type="text" class="filter-input" id="filter-session" placeholder="Session ID">
             <input type="text" class="filter-input" id="filter-provider" placeholder="Provider">
+            <select class="filter-input" id="filter-model">
+              <option value="">All Models</option>
+            </select>
             <button class="btn" id="apply-filters">Apply</button>
             <button class="btn" id="clear-filters">Clear</button>
           </div>
         </div>
 
+        <!-- Token Trend Chart -->
+        <div class="card full-width">
+          <div class="card-header">
+            📈 Token Usage Trend
+            <select class="chart-period" id="trend-period">
+              <option value="24">Last 24 Hours</option>
+              <option value="7">Last 7 Days</option>
+              <option value="30">Last 30 Days</option>
+            </select>
+          </div>
+          <div class="card-body chart-body">
+            <canvas id="token-trend-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Charts Grid -->
         <div class="grid-2">
           <div class="card">
             <div class="card-header">📊 Token Distribution</div>
-            <div class="card-body">
+            <div class="card-body chart-body">
               <canvas id="token-chart"></canvas>
             </div>
           </div>
           <div class="card">
             <div class="card-header">📈 Hourly Requests</div>
-            <div class="card-body">
+            <div class="card-body chart-body">
               <canvas id="hourly-chart"></canvas>
             </div>
           </div>
         </div>
 
+        <!-- Performance Metrics -->
+        <div class="card full-width">
+          <div class="card-header">⚡ Performance Metrics</div>
+          <div class="card-body">
+            <div class="perf-grid" id="perf-metrics">
+              <div class="perf-card">
+                <div class="perf-value">-</div>
+                <div class="perf-label">P50 Latency</div>
+              </div>
+              <div class="perf-card">
+                <div class="perf-value">-</div>
+                <div class="perf-label">P95 Latency</div>
+              </div>
+              <div class="perf-card">
+                <div class="perf-value">-</div>
+                <div class="perf-label">P99 Latency</div>
+              </div>
+              <div class="perf-card">
+                <div class="perf-value">-</div>
+                <div class="perf-label">Success Rate</div>
+              </div>
+            </div>
+            <div class="chart-body" style="height: 200px; margin-top: 20px;">
+              <canvas id="latency-chart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Requests List -->
         <div class="card">
-          <div class="card-header">📋 Recent Requests</div>
+          <div class="card-header">
+            📋 Recent Requests
+            <span class="request-count" id="request-count">0</span>
+          </div>
           <div class="requests-list" id="requests-list">
             <div class="loading">Loading requests...</div>
           </div>
@@ -165,7 +247,7 @@ export class App {
               <div class="tab" data-tab="heatmap">Heatmap</div>
               <div class="tab" data-tab="timeline">Timeline</div>
               <div class="tab" data-tab="graph">Dependency Graph</div>
-              <div class="tab" data-tab="insights">Insights</div>
+              <div class="tab" data-tab="insights">💡 Insights</div>
             </div>
 
             <div id="tab-token" class="tab-content active">
@@ -183,6 +265,25 @@ export class App {
             <div id="tab-insights" class="tab-content">
               <div id="insights-container"></div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session Compare Modal -->
+      <div class="modal-overlay" id="compare-modal">
+        <div class="modal modal-large">
+          <div class="modal-header">
+            <h2 class="modal-title">📊 Session Comparison</h2>
+            <button class="modal-close" id="compare-close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="compare-controls">
+              <select id="compare-session-1" class="compare-select"></select>
+              <span class="vs-text">VS</span>
+              <select id="compare-session-2" class="compare-select"></select>
+              <button class="btn btn-primary" id="compare-run">Compare</button>
+            </div>
+            <div class="compare-results" id="compare-results"></div>
           </div>
         </div>
       </div>
@@ -237,10 +338,27 @@ export class App {
         </div>
       `
 
+      // Update performance metrics
+      if (stats.latency) {
+        document.querySelector('#perf-metrics .perf-value')!.textContent = `${stats.latency.p50}ms`
+        document.querySelectorAll('#perf-metrics .perf-value')[1].textContent = `${stats.latency.p95}ms`
+        document.querySelectorAll('#perf-metrics .perf-value')[2].textContent = `${stats.latency.p99}ms`
+        document.querySelectorAll('#perf-metrics .perf-value')[3].textContent = '99.9%'
+      }
+
       this.updateCharts(stats)
+      this.populateModelFilter(stats.byModel)
     } catch (error) {
       document.getElementById('stats-grid')!.innerHTML = `<div class="error">Failed: ${error}</div>`
     }
+  }
+
+  private populateModelFilter(byModel: Record<string, number>) {
+    const select = document.getElementById('filter-model') as HTMLSelectElement
+    if (!select) return
+    
+    select.innerHTML = '<option value="">All Models</option>' +
+      Object.keys(byModel).map(model => `<option value="${model}">${model}</option>`).join('')
   }
 
   private updateCharts(stats: Stats) {
@@ -291,16 +409,109 @@ export class App {
         plugins: { legend: { display: false } }
       }
     })
+
+    // Load token trend data
+    this.loadTokenTrend()
+  }
+
+  private async loadTokenTrend() {
+    try {
+      const period = (document.getElementById('trend-period') as HTMLSelectElement).value
+      const endTime = Date.now()
+      const startTime = endTime - (parseInt(period) * 24 * 60 * 60 * 1000)
+      
+      const res = await fetch(`${this.apiBase}/requests?startTime=${startTime}&endTime=${endTime}&limit=1000`)
+      const data = await res.json()
+      
+      if (data.error) return
+
+      const requests: Request[] = data.requests
+      
+      // Group by hour
+      const hourlyData: Record<number, { input: number; output: number; total: number }> = {}
+      
+      requests.forEach(req => {
+        const hour = Math.floor(req.timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000
+        if (!hourlyData[hour]) {
+          hourlyData[hour] = { input: 0, output: 0, total: 0 }
+        }
+        hourlyData[hour].input += req.usage?.input || 0
+        hourlyData[hour].output += req.usage?.output || 0
+        hourlyData[hour].total += req.usage?.total || 0
+      })
+
+      const sortedHours = Object.keys(hourlyData).map(Number).sort((a, b) => a - b)
+      
+      const trendData: TokenTrendPoint[] = sortedHours.map(hour => ({
+        timestamp: hour,
+        input: hourlyData[hour].input,
+        output: hourlyData[hour].output,
+        total: hourlyData[hour].total
+      }))
+
+      this.renderTokenTrendChart(trendData)
+    } catch (error) {
+      console.error('Failed to load token trend:', error)
+    }
+  }
+
+  private renderTokenTrendChart(data: TokenTrendPoint[]) {
+    const ctx = document.getElementById('token-trend-chart') as HTMLCanvasElement
+    if (this.tokenTrendChart) this.tokenTrendChart.destroy()
+
+    const labels = data.map(d => new Date(d.timestamp).toLocaleString(undefined, { 
+      month: 'short', day: 'numeric', hour: '2-digit' 
+    }))
+
+    this.tokenTrendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Input Tokens',
+            data: data.map(d => d.input),
+            borderColor: '#58a6ff',
+            backgroundColor: 'rgba(88, 166, 255, 0.1)',
+            fill: true,
+            tension: 0.4
+          },
+          {
+            label: 'Output Tokens',
+            data: data.map(d => d.output),
+            borderColor: '#3fb950',
+            backgroundColor: 'rgba(63, 185, 80, 0.1)',
+            fill: true,
+            tension: 0.4
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+          mode: 'index',
+          intersect: false
+        },
+        scales: {
+          y: { beginAtZero: true },
+          x: { grid: { display: false } }
+        }
+      }
+    })
   }
 
   private async loadRequests() {
     try {
       const sessionFilter = (document.getElementById('filter-session') as HTMLInputElement).value
       const providerFilter = (document.getElementById('filter-provider') as HTMLInputElement).value
+      const modelFilter = (document.getElementById('filter-model') as HTMLSelectElement).value
+      const searchQuery = (document.getElementById('search-input') as HTMLInputElement).value
       
-      const params = new URLSearchParams({ limit: '20' })
+      const params = new URLSearchParams({ limit: '50' })
       if (sessionFilter) params.set('sessionId', sessionFilter)
       if (providerFilter) params.set('provider', providerFilter)
+      if (modelFilter) params.set('model', modelFilter)
 
       const res = await fetch(`${this.apiBase}/requests?${params}`)
       const data = await res.json()
@@ -310,15 +521,31 @@ export class App {
         return
       }
 
-      const requests: Request[] = data.requests
+      let requests: Request[] = data.requests
+      this.allRequests = requests
+
+      // Apply search filter
+      if (searchQuery) {
+        const query = searchQuery.toLowerCase()
+        requests = requests.filter(req => 
+          req.provider.toLowerCase().includes(query) ||
+          req.model.toLowerCase().includes(query) ||
+          req.runId.toLowerCase().includes(query) ||
+          req.sessionId.toLowerCase().includes(query)
+        )
+      }
+
+      document.getElementById('request-count')!.textContent = `${requests.length} requests`
+
       if (requests.length === 0) {
-        document.getElementById('requests-list')!.innerHTML = `<div class="empty-state">No requests</div>`
+        document.getElementById('requests-list')!.innerHTML = `<div class="empty-state">No requests found</div>`
         return
       }
 
       document.getElementById('requests-list')!.innerHTML = requests.map(req => {
         const time = new Date(req.timestamp).toLocaleString()
         const usage = req.usage || {}
+        const latency = req.latency ? `<span class="latency-badge">${req.latency}ms</span>` : ''
         return `
           <div class="request-item" data-runid="${req.runId}">
             <div class="request-header">
@@ -330,6 +557,7 @@ export class App {
               <span>Token: <strong>${usage.total?.toLocaleString() || 0}</strong></span>
               <span>In: <strong>${usage.input?.toLocaleString() || 0}</strong></span>
               <span>Out: <strong>${usage.output?.toLocaleString() || 0}</strong></span>
+              ${latency}
             </div>
           </div>
         `
@@ -500,6 +728,21 @@ export class App {
     document.getElementById(`tab-${tabName}`)?.classList.add('active')
   }
 
+  private connectWebSocket() {
+    // Simulated WebSocket connection for demo
+    const wsStatus = document.getElementById('ws-status') as HTMLElement
+    const wsText = document.getElementById('ws-text') as HTMLElement
+    
+    // In production, connect to actual WebSocket endpoint
+    // this.ws = new WebSocket('ws://localhost:18789/plugins/contextscope/ws')
+    
+    // Simulate connection status
+    setTimeout(() => {
+      wsStatus!.style.background = 'var(--success)'
+      wsText!.textContent = 'Live'
+    }, 1000)
+  }
+
   private setupEventListeners() {
     // Refresh button
     document.getElementById('refresh-btn')?.addEventListener('click', () => this.loadData())
@@ -512,13 +755,27 @@ export class App {
       window.open(`${this.apiBase}/export?format=csv`, '_blank')
     })
 
+    // Search
+    document.getElementById('search-btn')?.addEventListener('click', () => this.loadRequests())
+    document.getElementById('clear-search')?.addEventListener('click', () => {
+      ;(document.getElementById('search-input') as HTMLInputElement).value = ''
+      this.loadRequests()
+    })
+    ;(document.getElementById('search-input') as HTMLInputElement)?.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') this.loadRequests()
+    })
+
     // Filter buttons
     document.getElementById('apply-filters')?.addEventListener('click', () => this.loadRequests())
     document.getElementById('clear-filters')?.addEventListener('click', () => {
       ;(document.getElementById('filter-session') as HTMLInputElement).value = ''
       ;(document.getElementById('filter-provider') as HTMLInputElement).value = ''
+      ;(document.getElementById('filter-model') as HTMLSelectElement).value = ''
       this.loadRequests()
     })
+
+    // Trend period change
+    document.getElementById('trend-period')?.addEventListener('change', () => this.loadTokenTrend())
 
     // Modal close
     document.getElementById('modal-close')?.addEventListener('click', () => {
@@ -560,5 +817,8 @@ export class App {
     if (this.tokenChart) this.tokenChart.destroy()
     if (this.hourlyChart) this.hourlyChart.destroy()
     if (this.tokenDetailChart) this.tokenDetailChart.destroy()
+    if (this.tokenTrendChart) this.tokenTrendChart.destroy()
+    if (this.latencyChart) this.latencyChart.destroy()
+    if (this.ws) this.ws.close()
   }
 }

@@ -464,3 +464,163 @@ body {
   outline: none;
   border-color: var(--primary);
 }
+
+/* Search Bar */
+.search-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.search-input {
+  flex: 1;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* Chart Bodies */
+.chart-body {
+  height: 250px;
+}
+
+.full-width {
+  grid-column: 1 / -1;
+}
+
+/* Performance Metrics */
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.perf-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.perf-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 4px;
+}
+
+.perf-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* Latency Badge */
+.latency-badge {
+  background: rgba(188, 140, 255, 0.15);
+  color: var(--purple);
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Request Count */
+.request-count {
+  background: var(--bg-secondary);
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* Chart Period Select */
+.chart-period {
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.85rem;
+  margin-left: auto;
+}
+
+/* Compare Modal */
+.modal-large {
+  max-width: 1000px;
+}
+
+.compare-controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.compare-select {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.vs-text {
+  font-weight: 700;
+  color: var(--text-secondary);
+  font-size: 1.2rem;
+}
+
+.compare-results {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+}
+
+.compare-session {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.compare-session h3 {
+  margin-bottom: 16px;
+  color: var(--primary);
+}
+
+.compare-stat {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-stat:last-child {
+  border-bottom: none;
+}
+
+.compare-stat-label {
+  color: var(--text-secondary);
+}
+
+.compare-stat-value {
+  font-weight: 600;
+}
