@@ -1,0 +1,141 @@
+{
+  "id": "contextscope",
+  "name": "ContextScope",
+  "description": "Visualize and analyze API requests, prompts, completions, and token usage in real-time",
+  "uiHints": {
+    "storage.maxRequests": {
+      "label": "Max Requests to Store",
+      "help": "Maximum number of requests to keep in storage (older requests will be removed)",
+      "placeholder": "10000"
+    },
+    "storage.retentionDays": {
+      "label": "Retention Days",
+      "help": "Number of days to keep request data",
+      "placeholder": "7"
+    },
+    "visualization.theme": {
+      "label": "Dashboard Theme",
+      "help": "Color theme for the web dashboard"
+    },
+    "visualization.autoRefresh": {
+      "label": "Auto Refresh",
+      "help": "Automatically refresh the dashboard every few seconds"
+    },
+    "capture.includeSystemPrompts": {
+      "label": "Capture System Prompts",
+      "help": "Include system prompts in request analysis"
+    },
+    "capture.includeMessageHistory": {
+      "label": "Capture Message History",
+      "help": "Include conversation history in request analysis"
+    },
+    "capture.anonymizeContent": {
+      "label": "Anonymize Content",
+      "help": "Remove potentially sensitive content from captured data",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "storage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxRequests": {
+            "type": "number",
+            "minimum": 100,
+            "maximum": 100000,
+            "default": 10000
+          },
+          "retentionDays": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 7
+          },
+          "compression": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "visualization": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "auto"],
+            "default": "dark"
+          },
+          "autoRefresh": {
+            "type": "boolean",
+            "default": true
+          },
+          "refreshInterval": {
+            "type": "number",
+            "minimum": 1000,
+            "maximum": 30000,
+            "default": 5000
+          },
+          "charts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["tokens", "cost", "timeline", "models", "providers"]
+            },
+            "default": ["tokens", "cost", "timeline"]
+          }
+        }
+      },
+      "capture": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "includeSystemPrompts": {
+            "type": "boolean",
+            "default": true
+          },
+          "includeMessageHistory": {
+            "type": "boolean",
+            "default": true
+          },
+          "anonymizeContent": {
+            "type": "boolean",
+            "default": false
+          },
+          "maxPromptLength": {
+            "type": "number",
+            "minimum": 100,
+            "maximum": 100000,
+            "default": 10000
+          }
+        }
+      },
+      "alerts": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "tokenThreshold": {
+            "type": "number",
+            "minimum": 1000,
+            "maximum": 1000000,
+            "default": 50000
+          },
+          "costThreshold": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1000,
+            "default": 10.0
+          }
+        }
+      }
+    }
+  }
+}
