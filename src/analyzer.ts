@@ -62,6 +62,17 @@ export interface AnalysisResult {
   contextEvolution: ContextEvolution[];
   dependencyGraph: DependencyGraph;
   insights: AnalysisInsight[];
+  // Context Analysis
+  topicClusters: TopicCluster[];
+  contextSimilarities: ContextSimilarity[];
+  compressionSuggestions: ContextCompressionSuggestion[];
+  attentionDistribution: AttentionDistribution;
+  keyMessages: MessageImpact[];
+  contextHealth: {
+    score: number; // 0-100
+    issues: string[];
+    recommendations: string[];
+  };
 }
 
 export interface AnalysisInsight {
@@ -69,6 +80,35 @@ export interface AnalysisInsight {
   title: string;
   description: string;
   severity: 'low' | 'medium' | 'high';
+}
+
+export interface ContextSimilarity {
+  messageId: string;
+  similarTo: string;
+  similarityScore: number; // 0-1
+  topic: string;
+}
+
+export interface TopicCluster {
+  topic: string;
+  messageIds: string[];
+  keywords: string[];
+  percentage: number;
+}
+
+export interface ContextCompressionSuggestion {
+  type: 'remove' | 'summarize' | 'keep';
+  messageId: string;
+  reason: string;
+  tokenSavings: number;
+  impact: 'low' | 'medium' | 'high';
+}
+
+export interface AttentionDistribution {
+  systemPrompt: number; // 0-1
+  recentMessages: number; // 0-1
+  olderMessages: number; // 0-1
+  toolResponses: number; // 0-1
 }
 
 export class ContextAnalyzer {
@@ -87,12 +127,22 @@ export class ContextAnalyzer {
     'default': 8192
   };
 
+  private readonly STOP_WORDS = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare', 'ought', 'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but', 'if', 'or', 'because', 'until', 'while', 'although', 'though', 'after', 'before', 'when', 'whenever', 'where', 'wherever', 'whether', 'which', 'while', 'who', 'whoever', 'whom', 'whose', 'what', 'whatever', 'that', 'this', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs', 'myself', 'yourself', 'himself', 'herself', 'itself', 'ourselves', 'themselves']);
+
   analyzeRequest(request: RequestData, relatedRequests: RequestData[]): AnalysisResult {
     const tokenBreakdown = this.analyzeTokenDistribution(request);
     const messageImpacts = this.analyzeMessageImpacts(request);
     const contextEvolution = this.analyzeContextEvolution(relatedRequests);
     const dependencyGraph = this.analyzeToolDependencies(relatedRequests);
     const insights = this.generateInsights(tokenBreakdown, messageImpacts, contextEvolution);
+    
+    // Context Analysis
+    const topicClusters = this.analyzeTopicClusters(request);
+    const contextSimilarities = this.analyzeContextSimilarities(request);
+    const compressionSuggestions = this.generateCompressionSuggestions(request, messageImpacts);
+    const attentionDistribution = this.analyzeAttentionDistribution(request);
+    const keyMessages = this.extractKeyMessages(messageImpacts);
+    const contextHealth = this.calculateContextHealth(request, messageImpacts, tokenBreakdown);
 
     return {
       runId: request.runId,
@@ -101,7 +151,13 @@ export class ContextAnalyzer {
       messageImpacts,
       contextEvolution,
       dependencyGraph,
-      insights
+      insights,
+      topicClusters,
+      contextSimilarities,
+      compressionSuggestions,
+      attentionDistribution,
+      keyMessages,
+      contextHealth
     };
   }
 
@@ -398,5 +454,249 @@ export class ContextAnalyzer {
       }
     }
     return this.MODEL_CONTEXT_WINDOWS['default'];
+  }
+
+  /**
+   * Analyze topic clusters in the conversation
+   */
+  private analyzeTopicClusters(request: RequestData): TopicCluster[] {
+    const clusters: TopicCluster[] = [];
+    const messages = request.historyMessages || [];
+    
+    if (messages.length === 0) return clusters;
+
+    // Extract keywords from each message
+    const messageKeywords = messages.map((msg: any) => {
+      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      const words = content.toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w: string) => w.length > 3 && !this.STOP_WORDS.has(w));
+      
+      const wordFreq: Record<string, number> = {};
+      words.forEach((w: string) => wordFreq[w] = (wordFreq[w] || 0) + 1);
+      
+      return {
+        messageId: msg.id || `msg-${messages.indexOf(msg)}`,
+        keywords: Object.entries(wordFreq)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([word]) => word),
+        content
+      };
+    });
+
+    // Group by common keywords (simple clustering)
+    const allKeywords = new Set<string>();
+    messageKeywords.forEach(mk => mk.keywords.forEach(k => allKeywords.add(k)));
+
+    const keywordToMessages: Record<string, string[]> = {};
+    allKeywords.forEach(keyword => {
+      keywordToMessages[keyword] = messageKeywords
+        .filter(mk => mk.keywords.includes(keyword))
+        .map(mk => mk.messageId);
+    });
+
+    // Create clusters from top keywords
+    const topKeywords = Array.from(allKeywords).slice(0, 5);
+    const totalMessages = messages.length;
+
+    topKeywords.forEach(keyword => {
+      const msgIds = keywordToMessages[keyword];
+      if (msgIds.length > 0) {
+        clusters.push({
+          topic: keyword,
+          messageIds: msgIds,
+          keywords: [keyword],
+          percentage: Math.round((msgIds.length / totalMessages) * 100)
+        });
+      }
+    });
+
+    return clusters;
+  }
+
+  /**
+   * Analyze similarity between messages
+   */
+  private analyzeContextSimilarities(request: RequestData): ContextSimilarity[] {
+    const similarities: ContextSimilarity[] = [];
+    const messages = request.historyMessages || [];
+
+    if (messages.length < 2) return similarities;
+
+    // Simple Jaccard similarity based on word overlap
+    for (let i = 0; i < messages.length; i++) {
+      for (let j = i + 1; j < messages.length; j++) {
+        const msg1 = messages[i] as any;
+        const msg2 = messages[j] as any;
+        
+        const content1 = typeof msg1.content === 'string' ? msg1.content : JSON.stringify(msg1.content);
+        const content2 = typeof msg2.content === 'string' ? msg2.content : JSON.stringify(msg2.content);
+        
+        const words1 = new Set(content1.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3));
+        const words2 = new Set(content2.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3));
+        
+        const intersection = new Set([...words1].filter(w => words2.has(w)));
+        const union = new Set([...words1, ...words2]);
+        
+        const similarity = union.size > 0 ? intersection.size / union.size : 0;
+        
+        if (similarity > 0.3) { // Only report significant similarities
+          const commonWords = Array.from(intersection).slice(0, 3).join(', ');
+          similarities.push({
+            messageId: msg1.id || `msg-${i}`,
+            similarTo: msg2.id || `msg-${j}`,
+            similarityScore: Math.round(similarity * 100) / 100,
+            topic: commonWords
+          });
+        }
+      }
+    }
+
+    return similarities.sort((a, b) => b.similarityScore - a.similarityScore).slice(0, 10);
+  }
+
+  /**
+   * Generate context compression suggestions
+   */
+  private generateCompressionSuggestions(request: RequestData, messageImpacts: MessageImpact[]): ContextCompressionSuggestion[] {
+    const suggestions: ContextCompressionSuggestion[] = [];
+    const messages = request.historyMessages || [];
+
+    messages.forEach((msg: any, index: number) => {
+      const impact = messageImpacts.find(mi => mi.messageId === (msg.id || `msg-${index}`));
+      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      const tokenCount = this.estimateTokens(content);
+      
+      // Low impact, high token messages are candidates for removal
+      if (impact && impact.impactScore < 30 && tokenCount > 200) {
+        suggestions.push({
+          type: 'remove',
+          messageId: msg.id || `msg-${index}`,
+          reason: 'Low impact message consuming significant tokens',
+          tokenSavings: tokenCount,
+          impact: 'low'
+        });
+      }
+      
+      // Old messages with medium impact could be summarized
+      const msgTime = msg.timestamp || request.timestamp;
+      const age = request.timestamp - msgTime;
+      if (age > 30 * 60 * 1000 && impact && impact.impactScore >= 30 && impact.impactScore < 60) {
+        suggestions.push({
+          type: 'summarize',
+          messageId: msg.id || `msg-${index}`,
+          reason: 'Old message that could be summarized',
+          tokenSavings: Math.round(tokenCount * 0.5),
+          impact: 'medium'
+        });
+      }
+    });
+
+    // High impact messages should be kept
+    messageImpacts.filter(m => m.impactScore >= 80).forEach(m => {
+      suggestions.push({
+        type: 'keep',
+        messageId: m.messageId,
+        reason: 'High impact message - keep in context',
+        tokenSavings: 0,
+        impact: 'high'
+      });
+    });
+
+    return suggestions.sort((a, b) => b.tokenSavings - a.tokenSavings);
+  }
+
+  /**
+   * Analyze attention distribution
+   */
+  private analyzeAttentionDistribution(request: RequestData): AttentionDistribution {
+    const breakdown = this.analyzeTokenDistribution(request);
+    const total = breakdown.totalInput || 1;
+    
+    // Estimate attention based on token distribution and recency
+    return {
+      systemPrompt: Math.round((breakdown.systemPrompt / total) * 100) / 100,
+      recentMessages: 0.4, // Recent messages typically get more attention
+      olderMessages: 0.2, // Older messages get less attention
+      toolResponses: Math.round((breakdown.toolResponses / total) * 100) / 100
+    };
+  }
+
+  /**
+   * Extract key messages
+   */
+  private extractKeyMessages(messageImpacts: MessageImpact[]): MessageImpact[] {
+    return messageImpacts
+      .filter(m => m.impactScore >= 70)
+      .sort((a, b) => b.impactScore - a.impactScore)
+      .slice(0, 5);
+  }
+
+  /**
+   * Calculate overall context health score
+   */
+  private calculateContextHealth(request: RequestData, messageImpacts: MessageImpact[], tokenBreakdown: TokenBreakdown): {
+    score: number;
+    issues: string[];
+    recommendations: string[];
+  } {
+    const issues: string[] = [];
+    const recommendations: string[] = [];
+    let score = 100;
+
+    // Check for topic drift
+    const topicClusters = this.analyzeTopicClusters(request);
+    if (topicClusters.length > 5) {
+      issues.push('Conversation covers too many topics');
+      recommendations.push('Consider focusing on fewer topics per conversation');
+      score -= 10;
+    }
+
+    // Check for redundant messages
+    const similarities = this.analyzeContextSimilarities(request);
+    const highSimilarity = similarities.filter(s => s.similarityScore > 0.7);
+    if (highSimilarity.length > 3) {
+      issues.push('Multiple highly similar messages detected');
+      recommendations.push('Remove or merge redundant messages');
+      score -= 15;
+    }
+
+    // Check system prompt ratio
+    const totalTokens = tokenBreakdown.totalInput || 1;
+    const systemPromptRatio = tokenBreakdown.systemPrompt / totalTokens;
+    if (systemPromptRatio > 0.3) {
+      issues.push('System prompt takes up too much context');
+      recommendations.push('Consider shortening or optimizing system prompt');
+      score -= 20;
+    }
+
+    // Check for low-impact messages
+    const lowImpact = messageImpacts.filter(m => m.impactScore < 30).length;
+    if (lowImpact > messageImpacts.length * 0.3) {
+      issues.push('Many low-impact messages in context');
+      recommendations.push('Remove or summarize low-value messages');
+      score -= 15;
+    }
+
+    // Check context window utilization
+    const modelWindow = this.getModelContextWindow(request.model);
+    const utilization = totalTokens / modelWindow;
+    if (utilization > 0.9) {
+      issues.push('Context window nearly full');
+      recommendations.push('Apply compression or start new conversation');
+      score -= 25;
+    } else if (utilization > 0.7) {
+      issues.push('Context window getting full');
+      recommendations.push('Consider proactive compression');
+      score -= 10;
+    }
+
+    return {
+      score: Math.max(0, score),
+      issues,
+      recommendations
+    };
   }
 }

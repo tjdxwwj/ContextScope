@@ -97,6 +97,43 @@ export interface DetailedAnalysis {
   timeline: TimelineData;
   dependencyGraph: DependencyGraphData;
   insights: AnalysisInsight[];
+  // Context Analysis
+  topicClusters: Array<{
+    topic: string;
+    messageCount: number;
+    percentage: number;
+    keywords: string[];
+  }>;
+  contextSimilarities: Array<{
+    message1: string;
+    message2: string;
+    similarity: number;
+    commonTopic: string;
+  }>;
+  compressionSuggestions: Array<{
+    type: 'remove' | 'summarize' | 'keep';
+    messageId: string;
+    reason: string;
+    tokenSavings: number;
+    impact: string;
+  }>;
+  attentionDistribution: {
+    systemPrompt: number;
+    recentMessages: number;
+    olderMessages: number;
+    toolResponses: number;
+  };
+  keyMessages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    impactScore: number;
+  }>;
+  contextHealth: {
+    score: number;
+    issues: string[];
+    recommendations: string[];
+  };
 }
 
 export class RequestAnalyzerService {
@@ -309,7 +346,35 @@ export class RequestAnalyzerService {
         heatmap,
         timeline,
         dependencyGraph,
-        insights: analysis.insights
+        insights: analysis.insights,
+        // Context Analysis
+        topicClusters: analysis.topicClusters.map(tc => ({
+          topic: tc.topic,
+          messageCount: tc.messageIds.length,
+          percentage: tc.percentage,
+          keywords: tc.keywords
+        })),
+        contextSimilarities: analysis.contextSimilarities.map(cs => ({
+          message1: cs.messageId,
+          message2: cs.similarTo,
+          similarity: cs.similarityScore,
+          commonTopic: cs.topic
+        })),
+        compressionSuggestions: analysis.compressionSuggestions.map(cs => ({
+          type: cs.type,
+          messageId: cs.messageId,
+          reason: cs.reason,
+          tokenSavings: cs.tokenSavings,
+          impact: cs.impact
+        })),
+        attentionDistribution: analysis.attentionDistribution,
+        keyMessages: analysis.keyMessages.map(km => ({
+          id: km.messageId,
+          role: km.role,
+          content: km.content,
+          impactScore: km.impactScore
+        })),
+        contextHealth: analysis.contextHealth
       };
     } catch (error) {
       this.logger.error(`Failed to get detailed analysis: ${error}`);

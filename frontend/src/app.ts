@@ -254,16 +254,51 @@ export class App {
               <canvas id="token-detail-chart"></canvas>
             </div>
             <div id="tab-heatmap" class="tab-content">
-              <div class="heatmap-container" id="heatmap-container"></div>
+              <div class="heatmap-section">
+                <h3>🔥 Message Impact Heatmap</h3>
+                <p class="section-desc">Color intensity shows message impact on AI decisions</p>
+                <div class="heatmap-container" id="heatmap-container"></div>
+              </div>
+              <div class="heatmap-section" style="margin-top: 30px;">
+                <h3>📊 Attention Distribution</h3>
+                <div class="attention-chart" id="attention-chart"></div>
+              </div>
             </div>
             <div id="tab-timeline" class="tab-content">
-              <div id="timeline-container"></div>
+              <div class="timeline-section">
+                <h3>📈 Context Window Utilization</h3>
+                <p class="section-desc">Track how context window fills over time</p>
+                <div id="timeline-container"></div>
+              </div>
+              <div class="health-section" style="margin-top: 30px;">
+                <h3>🏥 Context Health Score</h3>
+                <div class="health-score" id="health-score"></div>
+                <div class="health-details" id="health-details"></div>
+              </div>
             </div>
             <div id="tab-graph" class="tab-content">
-              <div class="graph-nodes" id="graph-nodes"></div>
+              <div class="graph-section">
+                <h3>🔗 Tool Dependencies</h3>
+                <div class="graph-nodes" id="graph-nodes"></div>
+              </div>
+              <div class="similarity-section" style="margin-top: 30px;">
+                <h3>🔍 Message Similarities</h3>
+                <div id="similarity-container"></div>
+              </div>
             </div>
             <div id="tab-insights" class="tab-content">
-              <div id="insights-container"></div>
+              <div class="insights-section">
+                <h3>💡 AI Insights</h3>
+                <div id="insights-container"></div>
+              </div>
+              <div class="compression-section" style="margin-top: 30px;">
+                <h3>✂️ Compression Suggestions</h3>
+                <div id="compression-container"></div>
+              </div>
+              <div class="topics-section" style="margin-top: 30px;">
+                <h3>🏷️ Topic Clusters</h3>
+                <div id="topics-container"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -605,17 +640,28 @@ export class App {
         }
       })
 
-      // Render heatmap
+      // Render heatmap with attention distribution
       this.renderHeatmap(analysis.heatmap)
+      this.renderAttentionDistribution(analysis.attentionDistribution)
       
-      // Render timeline
+      // Render timeline with health score
       this.renderTimeline(analysis.timeline)
+      this.renderContextHealth(analysis.contextHealth)
       
       // Render dependency graph
       this.renderDependencyGraph(analysis.dependencyGraph)
       
+      // Render similarities
+      this.renderSimilarities(analysis.contextSimilarities)
+      
       // Render insights
       this.renderInsights(analysis.insights)
+      
+      // Render compression suggestions
+      this.renderCompressionSuggestions(analysis.compressionSuggestions)
+      
+      // Render topic clusters
+      this.renderTopicClusters(analysis.topicClusters)
 
       document.getElementById('analysis-modal')!.classList.add('active')
       this.switchTab('token')
@@ -636,21 +682,57 @@ export class App {
       rows.push(heatmap.messages.slice(i, i + 10))
     }
 
-    container.innerHTML = rows.map(row => `
-      <div class="heatmap-row">
-        ${row.map(msg => {
-          const intensity = msg.impact / heatmap.maxImpact
-          const r = Math.round(88 + (210 - 88) * intensity)
-          const g = Math.round(166 + (153 - 166) * intensity)
-          const b = Math.round(255 + (34 - 255) * intensity)
-          return `
-            <div class="heatmap-cell" style="background: rgb(${r},${g},${b});" title="Role: ${msg.role}, Tokens: ${msg.tokens}, Impact: ${msg.impact}">
-              ${msg.tokens}
-            </div>
-          `
-        }).join('')}
+    container.innerHTML = `
+      <div class="heatmap-legend">
+        <span>Low Impact</span>
+        <div class="legend-gradient"></div>
+        <span>High Impact</span>
       </div>
-    `).join('')
+      ${rows.map(row => `
+        <div class="heatmap-row">
+          ${row.map(msg => {
+            const intensity = msg.impact / heatmap.maxImpact
+            const hue = 200 - (intensity * 180) // Blue (high) to Red (low)
+            const saturation = 70 + (intensity * 30)
+            const lightness = 40 + (intensity * 20)
+            return `
+              <div class="heatmap-cell" 
+                   style="background: hsl(${hue}, ${saturation}%, ${lightness}%); border: 2px solid ${msg.impact > 70 ? '#fff' : 'transparent'};" 
+                   title="Role: ${msg.role}\nTokens: ${msg.tokens}\nImpact Score: ${msg.impact}\n${msg.content.substring(0, 100)}...">
+                <span class="cell-tokens">${msg.tokens}</span>
+                ${msg.impact > 70 ? '<span class="cell-star">⭐</span>' : ''}
+              </div>
+            `
+          }).join('')}
+        </div>
+      `).join('')}
+    `
+  }
+
+  private renderAttentionDistribution(attention: Analysis['attentionDistribution']) {
+    const container = document.getElementById('attention-chart')!
+    if (!attention) return
+
+    const items = [
+      { label: 'System Prompt', value: attention.systemPrompt, color: '#FF6384' },
+      { label: 'Recent Messages', value: attention.recentMessages, color: '#36A2EB' },
+      { label: 'Older Messages', value: attention.olderMessages, color: '#FFCE56' },
+      { label: 'Tool Responses', value: attention.toolResponses, color: '#4BC0C0' }
+    ]
+
+    container.innerHTML = `
+      <div class="attention-bars">
+        ${items.map(item => `
+          <div class="attention-bar-item">
+            <div class="attention-label">${item.label}</div>
+            <div class="attention-bar">
+              <div class="attention-bar-fill" style="width: ${item.value * 100}%; background: ${item.color}"></div>
+            </div>
+            <div class="attention-value">${Math.round(item.value * 100)}%</div>
+          </div>
+        `).join('')}
+      </div>
+    `
   }
 
   private renderTimeline(timeline: Analysis['timeline']) {
@@ -660,26 +742,63 @@ export class App {
       return
     }
 
-    container.innerHTML = timeline.points.map(point => {
-      const time = new Date(point.timestamp).toLocaleString()
-      const cls = point.utilization > 0.9 ? 'danger' : point.utilization > 0.7 ? 'warning' : ''
-      return `
-        <div class="timeline-point ${cls}">
-          <div class="timeline-content">
-            <div style="font-size:0.8rem;color:var(--text-secondary)">${time}</div>
-            <div style="display:flex;gap:16px;font-size:0.85rem">
-              <span>Tokens: <strong>${point.tokens.toLocaleString()}</strong></span>
-              <span>Messages: <strong>${point.messages}</strong></span>
-              <span>Utilization: <strong>${Math.round(point.utilization * 100)}%</strong></span>
-              ${point.summaryApplied ? '<span style="color:var(--warning)">⚠️ Summary applied</span>' : ''}
+    container.innerHTML = `
+      <div class="timeline-viz">
+        ${timeline.points.map((point, idx) => {
+          const time = new Date(point.timestamp).toLocaleTimeString()
+          const utilizationPct = Math.round(point.utilization * 100)
+          const colorClass = utilizationPct > 90 ? 'critical' : utilizationPct > 70 ? 'warning' : 'normal'
+          
+          return `
+            <div class="timeline-point ${colorClass}">
+              <div class="point-time">${time}</div>
+              <div class="point-bar-container">
+                <div class="point-bar ${colorClass}" style="height: ${Math.max(20, utilizationPct)}%"></div>
+              </div>
+              <div class="point-stats">
+                <span>${point.tokens.toLocaleString()} tokens</span>
+                <span>${point.messages} msgs</span>
+                <span class="utilization ${colorClass}">${utilizationPct}%</span>
+              </div>
+              ${point.summaryApplied ? '<div class="summary-badge">📝 Summarized</div>' : ''}
             </div>
-            <div class="progress-bar" style="margin-top:8px">
-              <div class="progress-fill" style="width:${Math.min(100, point.utilization * 100)}%"></div>
-            </div>
-          </div>
+          `
+        }).join('')}
+      </div>
+    `
+  }
+
+  private renderContextHealth(health: Analysis['contextHealth']) {
+    const scoreContainer = document.getElementById('health-score')!
+    const detailsContainer = document.getElementById('health-details')!
+    
+    const scoreColor = health.score >= 80 ? '#3fb950' : health.score >= 60 ? '#d29922' : '#f85149'
+    
+    scoreContainer.innerHTML = `
+      <div class="health-score-circle" style="border-color: ${scoreColor}">
+        <div class="health-score-value" style="color: ${scoreColor}">${health.score}</div>
+        <div class="health-score-label">/ 100</div>
+      </div>
+    `
+    
+    detailsContainer.innerHTML = `
+      ${health.issues.length > 0 ? `
+        <div class="health-issues">
+          <h4>⚠️ Issues Found</h4>
+          <ul>
+            ${health.issues.map(issue => `<li>${issue}</li>`).join('')}
+          </ul>
         </div>
-      `
-    }).join('')
+      ` : ''}
+      ${health.recommendations.length > 0 ? `
+        <div class="health-recommendations">
+          <h4>💡 Recommendations</h4>
+          <ul>
+            ${health.recommendations.map(rec => `<li>${rec}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+    `
   }
 
   private renderDependencyGraph(graph: Analysis['dependencyGraph']) {
@@ -718,6 +837,89 @@ export class App {
         </div>
       `
     }).join('')
+  }
+
+  private renderSimilarities(similarities: Analysis['contextSimilarities']) {
+    const container = document.getElementById('similarity-container')!
+    if (!similarities || similarities.length === 0) {
+      container.innerHTML = '<div class="empty-state">No significant similarities found</div>'
+      return
+    }
+
+    container.innerHTML = similarities.map(sim => `
+      <div class="similarity-item">
+        <div class="similarity-header">
+          <span class="similarity-score">${Math.round(sim.similarity * 100)}% similar</span>
+          <span class="similarity-topic">🏷️ ${sim.commonTopic}</span>
+        </div>
+        <div class="similarity-messages">
+          <span>Message ${sim.message1}</span>
+          <span>⟷</span>
+          <span>Message ${sim.message2}</span>
+        </div>
+      </div>
+    `).join('')
+  }
+
+  private renderCompressionSuggestions(suggestions: Analysis['compressionSuggestions']) {
+    const container = document.getElementById('compression-container')!
+    if (!suggestions || suggestions.length === 0) {
+      container.innerHTML = '<div class="empty-state">No compression suggestions</div>'
+      return
+    }
+
+    const totalSavings = suggestions.reduce((sum, s) => sum + s.tokenSavings, 0)
+    
+    container.innerHTML = `
+      <div class="compression-summary">
+        <strong>Potential Token Savings: ${totalSavings} tokens</strong>
+      </div>
+      <div class="suggestions-list">
+        ${suggestions.map(s => {
+          const icon = s.type === 'remove' ? '❌' : s.type === 'summarize' ? '📝' : '✅'
+          const color = s.type === 'remove' ? 'var(--danger)' : s.type === 'summarize' ? 'var(--warning)' : 'var(--success)'
+          return `
+            <div class="suggestion-item" style="border-left-color: ${color}">
+              <div class="suggestion-header">
+                <span>${icon} ${s.type.toUpperCase()}</span>
+                <span style="color: ${color}">Save ${s.tokenSavings} tokens</span>
+              </div>
+              <div class="suggestion-reason">${s.reason}</div>
+              <div class="suggestion-id">Message: ${s.messageId}</div>
+            </div>
+          `
+        }).join('')}
+      </div>
+    `
+  }
+
+  private renderTopicClusters(clusters: Analysis['topicClusters']) {
+    const container = document.getElementById('topics-container')!
+    if (!clusters || clusters.length === 0) {
+      container.innerHTML = '<div class="empty-state">No topic clusters identified</div>'
+      return
+    }
+
+    container.innerHTML = `
+      <div class="topics-grid">
+        ${clusters.map((cluster, idx) => {
+          const colors = ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#bc8cff']
+          const color = colors[idx % colors.length]
+          return `
+            <div class="topic-card" style="border-top-color: ${color}">
+              <div class="topic-header">
+                <span class="topic-name" style="color: ${color}">${cluster.topic}</span>
+                <span class="topic-percentage">${cluster.percentage}%</span>
+              </div>
+              <div class="topic-messages">${cluster.messageCount} messages</div>
+              <div class="topic-keywords">
+                ${cluster.keywords.map(k => `<span class="keyword-tag">${k}</span>`).join('')}
+              </div>
+            </div>
+          `
+        }).join('')}
+      </div>
+    `
   }
 
   private switchTab(tabName: string) {
