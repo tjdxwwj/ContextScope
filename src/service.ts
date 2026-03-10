@@ -180,6 +180,9 @@ export class RequestAnalyzerService {
         data = this.anonymizeContent(data);
       }
 
+      // 当 API 没有返回 usage 时，估算 token 数量
+      this.estimateUsage(data);
+
       await this.storage.captureRequest(data);
       this.logger.debug?.(`Captured response for run ${data.runId}`);
     } catch (error) {
@@ -588,6 +591,41 @@ export class RequestAnalyzerService {
       }
     }
     return windows['default'];
+  }
+
+  /**
+   * 估算文本的 token 数量
+   * 中文：约 1.5 个字符 = 1 个 token
+   * 英文：约 4 个字符 = 1 个 token
+   */
+  private estimateTokens(text: string): number {
+    if (!text) return 0;
+    
+    const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+    const otherChars = text.length - chineseChars;
+    
+    return Math.round(chineseChars / 1.5 + otherChars / 4);
+  }
+
+  /**
+   * 当 API 没有返回 usage 时，估算 token 数量
+   */
+  private estimateUsage(data: any): void {
+    if (!data.usage || data.usage.totalTokens === 0) {
+      // 估算 output tokens
+      const content = data.assistantTexts?.join('\n') || '';
+      const estimatedOutput = this.estimateTokens(content);
+      
+      data.usage = {
+        input: data.usage?.input || 0,
+        output: estimatedOutput,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: (data.usage?.input || 0) + estimatedOutput
+      };
+      
+      this.logger.debug?.(`Estimated ${estimatedOutput} tokens for run ${data.runId}`);
+    }
   }
 
   /**
