@@ -8,6 +8,7 @@ import type { RequestAnalyzerStorage, SubagentLinkData, ToolCallData } from './s
 import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
 import { TokenEstimationService } from './token-estimator.js';
+import type { ChainResponse, ChainItem, ChainStats } from './types-chain.js';
 
 interface PluginLogger {
   debug?: (message: string) => void;
@@ -732,6 +733,121 @@ export class RequestAnalyzerService {
       contextSnapshot,
       comparison
     };
+  }
+
+  /**
+   * Get raw call chain for a runId
+   * Returns tools, subagents, inputs, outputs without any analysis
+   */
+  async getChain(runId: string, limit = 100, offset = 0): Promise<ChainResponse | null> {
+    try {
+      const requests = await this.storage.getRequests({ runId, limit: 10000 });
+      if (requests.length === 0) return null;
+
+      const mainRequest = requests.find(r => r.type === 'input') || requests[0];
+      const subagentLinks = await this.storage.getSubagentLinks({ parentRunId: runId, limit: 1000 });
+      const toolCalls = await this.storage.getToolCalls({ runId, limit: 1000 });
+
+      const chainItems: ChainItem[] = [];
+
+      // Add requests
+      requests.forEach(req => {
+        chainItems.push({
+          id: req.runId,
+          runId: req.runId,
+          type: req.type as 'input' | 'output',
+          timestamp: req.timestamp,
+          input: req.type === 'input' ? { prompt: req.prompt, systemPrompt: req.systemPrompt, historyMessages: req.historyMessages } : undefined,
+          output: req.type === 'output' ? { assistantTexts: req.assistantTexts } : undefined,
+          usage: req.usage ? { input: req.usage.input || 0, output: req.usage.output || 0, total: req.usage.total || 0 } : undefined,
+          metadata: { provider: req.provider, model: req.model, status: 'success' }
+        });
+      });
+
+      // Add tool calls
+      toolCalls.forEach(tc => {
+        if (tc.params) {
+          chainItems.push({
+            id: tc.toolCallId || `tool_${tc.id}`,
+            runId: tc.runId,
+            type: 'tool_call',
+            timestamp: tc.timestamp,
+            duration: tc.durationMs,
+            input: { params: tc.params },
+            metadata: { toolName: tc.toolName, status: tc.error ? 'error' : 'success', error: tc.error }
+          });
+        }
+        if (tc.result !== undefined) {
+          chainItems.push({
+            id: tc.toolCallId || `tool_${tc.id}`,
+            runId: tc.runId,
+            type: 'tool_result',
+            timestamp: tc.timestamp + (tc.durationMs || 0),
+            output: { result: tc.result },
+            metadata: { toolName: tc.toolName, status: tc.error ? 'error' : 'success', error: tc.error }
+          });
+        }
+      });
+
+      // Add subagent links
+      subagentLinks.forEach(link => {
+        if (link.label || link.mode) {
+          chainItems.push({
+            id: link.childRunId || `subagent_${link.id}`,
+            runId: link.childRunId || '',
+            parentRunId: link.parentRunId,
+            type: 'subagent_spawn',
+            timestamp: link.timestamp,
+            input: { task: link.label },
+            metadata: { agentId: link.childSessionKey, status: 'success' }
+          });
+        }
+        if (link.endedAt || link.outcome) {
+          chainItems.push({
+            id: link.childRunId || `subagent_${link.id}`,
+            runId: link.childRunId || '',
+            parentRunId: link.parentRunId,
+            type: 'subagent_result',
+            timestamp: link.endedAt || link.timestamp,
+            duration: link.endedAt ? (link.endedAt - link.timestamp) : undefined,
+            output: { outcome: link.outcome },
+            metadata: { agentId: link.childSessionKey, status: link.outcome as any || 'success', error: link.error }
+          });
+        }
+      });
+
+      // Sort descending (most recent first)
+      chainItems.sort((a, b) => b.timestamp - a.timestamp);
+
+      // Stats
+      const stats: ChainStats = {
+        totalItems: chainItems.length,
+        inputCount: chainItems.filter(i => i.type === 'input').length,
+        outputCount: chainItems.filter(i => i.type === 'output').length,
+        toolCallCount: chainItems.filter(i => i.type === 'tool_call' || i.type === 'tool_result').length,
+        subagentCount: chainItems.filter(i => i.type === 'subagent_spawn' || i.type === 'subagent_result').length,
+        totalTokens: chainItems.reduce((sum, i) => sum + (i.usage?.total || 0), 0)
+      };
+
+      const paginatedChain = chainItems.slice(offset, offset + limit);
+      const endTime = requests.find(r => r.type === 'output')?.timestamp;
+
+      return {
+        runId,
+        sessionId: mainRequest.sessionId,
+        provider: mainRequest.provider,
+        model: mainRequest.model,
+        startTime: Math.min(...requests.map(r => r.timestamp)),
+        endTime: endTime || Math.max(...requests.map(r => r.timestamp)),
+        duration: endTime ? endTime - Math.min(...requests.map(r => r.timestamp)) : undefined,
+        pagination: { limit, offset, total: chainItems.length, hasMore: offset + limit < chainItems.length },
+        chain: paginatedChain,
+        stats
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get chain: ${error}`);
+      return null;
+    }
   }
 
   /**

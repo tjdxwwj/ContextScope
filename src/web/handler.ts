@@ -13,6 +13,7 @@ import type { PluginConfig } from '../config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createChainHttpHandler } from './chain-handler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,11 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     const path = url.pathname;
 
     try {
+      // Chain API handler
+      const chainHandler = createChainHttpHandler({ service, logger });
+      const chainHandled = await chainHandler(req, res);
+      if (chainHandled) return true;
+
       // API 端点
       if (path === '/plugins/contextscope/api/stats') {
         return await handleStats(req, res);
