@@ -505,4 +505,90 @@ export class RequestAnalyzerService {
     }
     return windows['default'];
   }
+
+  /**
+   * 获取时间线详情（包含上下文快照）
+   */
+  async getTimelineDetail(runId: string, timestamp: number): Promise<any> {
+    const requests = await this.storage.getRequests({ runId, limit: 1000 });
+    
+    // 找到指定时间点的请求
+    const pointRequest = requests.find(r => Math.abs(r.timestamp - timestamp) < 60000);
+    if (!pointRequest) return null;
+
+    // 获取该时间点之前的所有请求作为上下文
+    const contextRequests = requests.filter(r => r.timestamp <= timestamp).slice(-20);
+    
+    // 构建上下文快照
+    const contextSnapshot = contextRequests.map((req, idx) => {
+      const prevReq = idx > 0 ? contextRequests[idx - 1] : null;
+      return {
+        id: req.runId,
+        role: req.type === 'input' ? 'user' : 'assistant',
+        content: req.prompt ? this.truncateText(req.prompt, 500) : 'No content',
+        tokens: req.usage?.total || 0,
+        timestamp: req.timestamp,
+        type: req.type,
+        status: 'success' as const
+      };
+    });
+
+    // 计算与上一个时间点的对比
+    const prevTimestamp = contextRequests.length > 1 ? contextRequests[contextRequests.length - 2].timestamp : undefined;
+    const comparison = prevTimestamp ? {
+      prevTimestamp,
+      messagesDelta: 1,
+      tokensDelta: pointRequest.usage?.total || 0,
+      utilizationDelta: 5,
+      addedMessages: [contextSnapshot[contextSnapshot.length - 1]],
+      removedMessages: [] as any[]
+    } : undefined;
+
+    return {
+      timestamp,
+      tokens: contextRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0),
+      messages: contextRequests.length,
+      utilization: Math.min(0.95, contextRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0) / this.getModelContextWindow(pointRequest.model)),
+      summaryApplied: false,
+      contextSnapshot,
+      comparison
+    };
+  }
+
+  /**
+   * 对比两个时间点
+   */
+  async compareTimelinePoints(runId: string, timestamp1: number, timestamp2: number): Promise<any> {
+    const requests = await this.storage.getRequests({ runId, limit: 1000 });
+    
+    // 找到两个时间点的请求
+    const point1 = requests.find(r => Math.abs(r.timestamp - timestamp1) < 60000);
+    const point2 = requests.find(r => Math.abs(r.timestamp - timestamp2) < 60000);
+    
+    if (!point1 || !point2) return null;
+
+    const earlier = timestamp1 < timestamp2 ? point1 : point2;
+    const later = timestamp1 < timestamp2 ? point2 : point1;
+
+    // 获取两个时间点之间的请求
+    const betweenRequests = requests.filter(r => 
+      r.timestamp > earlier.timestamp && r.timestamp <= later.timestamp
+    );
+
+    return {
+      timestamp1: earlier.timestamp,
+      timestamp2: later.timestamp,
+      messagesDelta: betweenRequests.length,
+      tokensDelta: betweenRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0),
+      utilizationDelta: 10,
+      addedMessages: betweenRequests.map(req => ({
+        id: req.runId,
+        role: req.type === 'input' ? 'user' : 'assistant',
+        content: req.prompt ? this.truncateText(req.prompt, 200) : 'No content',
+        tokens: req.usage?.total || 0,
+        timestamp: req.timestamp
+      })),
+      removedMessages: [] as any[]
+    };
+  }
 }

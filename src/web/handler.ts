@@ -71,6 +71,14 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleExport(req, res, url);
       }
 
+      if (path === '/plugins/contextscope/api/timeline/detail') {
+        return await handleTimelineDetail(req, res, url);
+      }
+
+      if (path === '/plugins/contextscope/api/timeline/compare') {
+        return await handleTimelineCompare(req, res, url);
+      }
+
       // Dashboard 主页面
       if (path === '/plugins/contextscope' || path === '/plugins/contextscope/') {
         return await handleDashboard(req, res);
@@ -363,6 +371,87 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     res.setHeader('Content-Type', 'text/html');
     res.end(html);
     return true;
+  }
+
+  async function handleTimelineDetail(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const runId = url.searchParams.get('runId');
+      const timestamp = url.searchParams.get('timestamp');
+      
+      if (!runId || !timestamp) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'runId and timestamp parameters are required' }));
+        return true;
+      }
+
+      const detail = await service.getTimelineDetail(runId, parseInt(timestamp));
+      
+      if (!detail) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Timeline detail not found' }));
+        return true;
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(detail));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get timeline detail: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get timeline detail' }));
+      return true;
+    }
+  }
+
+  async function handleTimelineCompare(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const runId = url.searchParams.get('runId');
+      const timestamp1 = url.searchParams.get('timestamp1');
+      const timestamp2 = url.searchParams.get('timestamp2');
+      
+      if (!runId || !timestamp1 || !timestamp2) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'runId, timestamp1, and timestamp2 parameters are required' }));
+        return true;
+      }
+
+      const comparison = await service.compareTimelinePoints(runId, parseInt(timestamp1), parseInt(timestamp2));
+      
+      if (!comparison) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Comparison data not found' }));
+        return true;
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(comparison));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to compare timeline points: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to compare timeline points' }));
+      return true;
+    }
   }
 
   function convertToCSV(requests: any[]): string {
