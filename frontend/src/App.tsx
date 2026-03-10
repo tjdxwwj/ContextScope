@@ -17,14 +17,12 @@ export default function App() {
   const [selectedAnalysis, setSelectedAnalysis] = useState<Analysis | null>(null)
   const [activeTab, setActiveTab] = useState<'token' | 'heatmap' | 'timeline' | 'graph' | 'insights'>('token')
   const [trendPeriod, setTrendPeriod] = useState(24)
-  const [tokenTrendData, setTokenTrendData] = useState<TokenTrendPoint[]>([])
+  const [_tokenTrendData, setTokenTrendData] = useState<TokenTrendPoint[]>([])
 
   // Chart refs
   const tokenChartRef = useRef<Chart | null>(null)
   const hourlyChartRef = useRef<Chart | null>(null)
-  const tokenDetailChartRef = useRef<Chart | null>(null)
   const tokenTrendChartRef = useRef<Chart | null>(null)
-  const latencyChartRef = useRef<Chart | null>(null)
 
   // 加载数据
   const loadData = useCallback(async () => {
@@ -215,12 +213,15 @@ export default function App() {
   const showAnalysis = async (runId: string) => {
     try {
       const res = await fetch(`${API_BASE}/analysis?runId=${runId}`)
-      const analysis: Analysis = await res.json()
-      if (analysis.error) {
-        alert(`Failed: ${analysis.error}`)
+      const result = await res.json()
+      
+      // 检查错误响应
+      if ('error' in result && result.error) {
+        alert(`Failed: ${result.error}`)
         return
       }
 
+      const analysis: Analysis = result
       setSelectedAnalysis(analysis)
       setActiveTab('token')
     } catch (error) {

@@ -16,14 +16,21 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:all": "npm run build:frontend && npm run build:backend",
+    "build:backend": "tsc",
+    "build:frontend": "cd frontend && npm run build",
     "dev": "tsc --watch",
-    "test": "vitest"
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:all": "concurrently \"npm run dev\" \"npm run dev:frontend\"",
+    "test": "vitest",
+    "preview": "cd frontend && npm run preview"
   },
   "dependencies": {
     "openclaw": "^2026.3.8"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "concurrently": "^9.0.0",
     "typescript": "^5.0.0",
     "vitest": "^1.0.0"
   },

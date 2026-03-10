@@ -2,11 +2,24 @@
  * HTTP Handler for ContextScope Dashboard
  * 
  * Serves the web interface and API endpoints with advanced visualizations
+ * 
+ * Production Mode: Serves pre-built React frontend from dist/frontend
+ * Development Mode: Proxies requests to Vite dev server (localhost:5173)
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RequestAnalyzerService } from '../service.js';
 import type { PluginConfig } from '../config.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// 生产模式：检查 frontend 构建产物是否存在
+const FRONTEND_DIST_PATH = join(__dirname, '..', '..', 'frontend', 'dist');
+const FRONTEND_INDEX_PATH = join(FRONTEND_DIST_PATH, 'index.html');
+const isProduction = existsSync(FRONTEND_INDEX_PATH);
 
 interface PluginLogger {
   debug?: (message: string) => void;
@@ -24,11 +37,20 @@ interface HandlerParams {
 export function createAnalyzerHttpHandler(params: HandlerParams) {
   const { service, config, logger } = params;
 
+  // 记录模式
+  logger.info(`ContextScope Dashboard: ${isProduction ? 'Production' : 'Development'} mode`);
+  if (isProduction) {
+    logger.info(`Serving frontend from: ${FRONTEND_DIST_PATH}`);
+  } else {
+    logger.info(`Frontend dev server: http://localhost:5173`);
+  }
+
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     const path = url.pathname;
 
     try {
+      // API 端点
       if (path === '/plugins/contextscope/api/stats') {
         return await handleStats(req, res);
       }
@@ -49,8 +71,14 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleExport(req, res, url);
       }
 
+      // Dashboard 主页面
       if (path === '/plugins/contextscope' || path === '/plugins/contextscope/') {
         return await handleDashboard(req, res);
+      }
+
+      // 生产模式：提供静态资源
+      if (isProduction && path.startsWith('/plugins/contextscope/')) {
+        return await handleStaticFile(req, res, path);
       }
 
       res.statusCode = 404;
@@ -64,6 +92,66 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       return true;
     }
   };
+
+  /**
+   * 生产模式：提供静态文件
+   */
+  async function handleStaticFile(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
+    // 移除 /plugins/contextscope 前缀
+    const relativePath = path.replace('/plugins/contextscope', '');
+    const filePath = join(FRONTEND_DIST_PATH, relativePath);
+
+    // 安全检查：防止目录遍历攻击
+    if (!filePath.startsWith(FRONTEND_DIST_PATH)) {
+      res.statusCode = 403;
+      res.end('Forbidden');
+      return true;
+    }
+
+    if (!existsSync(filePath)) {
+      // 如果是 SPA 路由，返回 index.html
+      if (!filePath.includes('.')) {
+        return await handleDashboard(req, res);
+      }
+      res.statusCode = 404;
+      res.end('Not Found');
+      return true;
+    }
+
+    // 读取并返回文件
+    try {
+      const ext = filePath.split('.').pop()?.toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        'html': 'text/html',
+        'js': 'text/javascript',
+        'mjs': 'text/javascript',
+        'css': 'text/css',
+        'json': 'application/json',
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'gif': 'image/gif',
+        'svg': 'image/svg+xml',
+        'ico': 'image/x-icon',
+        'woff': 'font/woff',
+        'woff2': 'font/woff2'
+      };
+
+      const mimeType = mimeTypes[ext || ''] || 'application/octet-stream';
+      const content = readFileSync(filePath);
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Cache-Control', 'public, max-age=31536000');
+      res.end(content);
+      return true;
+    } catch (error) {
+      logger.error(`Failed to serve static file ${filePath}: ${error}`);
+      res.statusCode = 500;
+      res.end('Internal Server Error');
+      return true;
+    }
+  }
 
   async function handleStats(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     if (req.method !== 'GET') {
@@ -256,6 +344,20 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       return true;
     }
 
+    // 生产模式：返回构建的 index.html
+    if (isProduction && existsSync(FRONTEND_INDEX_PATH)) {
+      try {
+        const html = readFileSync(FRONTEND_INDEX_PATH, 'utf-8');
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/html');
+        res.end(html);
+        return true;
+      } catch (error) {
+        logger.error(`Failed to read index.html: ${error}`);
+      }
+    }
+
+    // 开发模式：返回动态生成的 HTML（向后兼容）
     const html = generateDashboardHTML(config);
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/html');
