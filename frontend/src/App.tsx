@@ -1,23 +1,66 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
+import { useAtomValue, useSetAtom } from 'jotai'
 import Chart from 'chart.js/auto'
-import type { Stats, Request, Analysis, TokenTrendPoint } from './types'
+import {
+  // 状态 atoms
+  loadingAtom,
+  wsConnectedAtom,
+  statsAtom,
+  searchQueryAtom,
+  filtersAtom,
+  selectedAnalysisAtom,
+  activeTabAtom,
+  trendPeriodAtom,
+  tokenTrendDataAtom,
+  analysisModalOpenAtom,
+  requestCountAtom,
+  filteredRequestsAtom,
+  // API atoms
+  loadStatsAtom,
+  loadRequestsAtom,
+  loadTokenTrendAtom,
+  loadAnalysisAtom,
+  refreshAllAtom,
+  clearFiltersAtom,
+  closeAnalysisModalAtom,
+  // Charts
+  chartConfigAtom
+} from './atoms'
+import type { Stats } from './types'
 
-// API 基础路径
 const API_BASE = '/plugins/contextscope/api'
 
 // 主应用组件
 export default function App() {
-  // 状态管理
-  const [stats, setStats] = useState<Stats | null>(null)
-  const [requests, setRequests] = useState<Request[]>([])
-  const [loading, setLoading] = useState(true)
-  const [wsConnected, setWsConnected] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [filters, setFilters] = useState({ session: '', provider: '', model: '' })
-  const [selectedAnalysis, setSelectedAnalysis] = useState<Analysis | null>(null)
-  const [activeTab, setActiveTab] = useState<'token' | 'heatmap' | 'timeline' | 'graph' | 'insights'>('token')
-  const [trendPeriod, setTrendPeriod] = useState(24)
-  const [_tokenTrendData, setTokenTrendData] = useState<TokenTrendPoint[]>([])
+  // 读取状态
+  const loading = useAtomValue(loadingAtom)
+  const wsConnected = useAtomValue(wsConnectedAtom)
+  const stats = useAtomValue(statsAtom)
+  const searchQuery = useAtomValue(searchQueryAtom)
+  const filters = useAtomValue(filtersAtom)
+  const selectedAnalysis = useAtomValue(selectedAnalysisAtom)
+  const activeTab = useAtomValue(activeTabAtom)
+  const trendPeriod = useAtomValue(trendPeriodAtom)
+  const tokenTrendData = useAtomValue(tokenTrendDataAtom)
+  const analysisModalOpen = useAtomValue(analysisModalOpenAtom)
+  const requestCount = useAtomValue(requestCountAtom)
+  const filteredRequests = useAtomValue(filteredRequestsAtom)
+  const chartConfig = useAtomValue(chartConfigAtom)
+
+  // 设置状态
+  const setSearchQuery = useSetAtom(searchQueryAtom)
+  const setFilters = useSetAtom(filtersAtom)
+  const setTrendPeriod = useSetAtom(trendPeriodAtom)
+  const setActiveTab = useSetAtom(activeTabAtom)
+
+  // Actions
+  const loadStats = useSetAtom(loadStatsAtom)
+  const loadRequests = useSetAtom(loadRequestsAtom)
+  const loadTokenTrend = useSetAtom(loadTokenTrendAtom)
+  const loadAnalysis = useSetAtom(loadAnalysisAtom)
+  const refreshAll = useSetAtom(refreshAllAtom)
+  const clearFilters = useSetAtom(clearFiltersAtom)
+  const closeAnalysisModal = useSetAtom(closeAnalysisModalAtom)
 
   // Chart refs
   const tokenChartRef = useRef<Chart | null>(null)
@@ -27,108 +70,21 @@ export default function App() {
   // 加载数据
   const loadData = useCallback(async () => {
     await Promise.all([loadStats(), loadRequests()])
-  }, [filters, searchQuery])
-
-  // 加载统计
-  const loadStats = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/stats`)
-      const data = await res.json()
-      if (data.error) return
-      
-      const statsData: Stats = data.stats
-      setStats(statsData)
-      updateCharts(statsData)
-      await loadTokenTrend()
-    } catch (error) {
-      console.error('Failed to load stats:', error)
-    }
-  }
-
-  // 加载请求列表
-  const loadRequests = async () => {
-    try {
-      const params = new URLSearchParams({ limit: '50' })
-      if (filters.session) params.set('sessionId', filters.session)
-      if (filters.provider) params.set('provider', filters.provider)
-      if (filters.model) params.set('model', filters.model)
-
-      const res = await fetch(`${API_BASE}/requests?${params}`)
-      const data = await res.json()
-      if (data.error) return
-
-      let reqs: Request[] = data.requests
-      
-      // 应用搜索过滤
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase()
-        reqs = reqs.filter(req => 
-          req.provider.toLowerCase().includes(query) ||
-          req.model.toLowerCase().includes(query) ||
-          req.runId.toLowerCase().includes(query) ||
-          req.sessionId.toLowerCase().includes(query)
-        )
-      }
-
-      setRequests(reqs)
-      setLoading(false)
-    } catch (error) {
-      console.error('Failed to load requests:', error)
-      setLoading(false)
-    }
-  }
-
-  // 加载 Token 趋势
-  const loadTokenTrend = async () => {
-    try {
-      const endTime = Date.now()
-      const startTime = endTime - (trendPeriod * 24 * 60 * 60 * 1000)
-      
-      const res = await fetch(`${API_BASE}/requests?startTime=${startTime}&endTime=${endTime}&limit=1000`)
-      const data = await res.json()
-      if (data.error) return
-
-      const reqs: Request[] = data.requests
-      
-      // 按小时分组
-      const hourlyData: Record<number, { input: number; output: number; total: number }> = {}
-      
-      reqs.forEach(req => {
-        const hour = Math.floor(req.timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000
-        if (!hourlyData[hour]) hourlyData[hour] = { input: 0, output: 0, total: 0 }
-        hourlyData[hour].input += req.usage?.input || 0
-        hourlyData[hour].output += req.usage?.output || 0
-        hourlyData[hour].total += req.usage?.total || 0
-      })
-
-      const sortedHours = Object.keys(hourlyData).map(Number).sort((a, b) => a - b)
-      const trendData: TokenTrendPoint[] = sortedHours.map(hour => ({
-        timestamp: hour,
-        input: hourlyData[hour].input,
-        output: hourlyData[hour].output,
-        total: hourlyData[hour].total
-      }))
-
-      setTokenTrendData(trendData)
-      renderTokenTrendChart(trendData)
-    } catch (error) {
-      console.error('Failed to load token trend:', error)
-    }
-  }
+  }, [loadStats, loadRequests])
 
   // 更新图表
-  const updateCharts = (statsData: Stats) => {
+  const handleUpdateCharts = useCallback((statsData: Stats) => {
     // Token 分布图
     const tokenCtx = document.getElementById('token-chart') as HTMLCanvasElement
     if (tokenChartRef.current) tokenChartRef.current.destroy()
     
     tokenChartRef.current = new Chart(tokenCtx, {
-      type: 'doughnut',
+      type: chartConfig.tokenDistribution.type,
       data: {
         labels: Object.keys(statsData.byProvider),
         datasets: [{
           data: Object.values(statsData.byProvider),
-          backgroundColor: ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#bc8cff', '#36A2EB', '#FFCE56', '#4BC0C0']
+          backgroundColor: chartConfig.tokenDistribution.colors
         }]
       },
       options: {
@@ -143,13 +99,13 @@ export default function App() {
     if (hourlyChartRef.current) hourlyChartRef.current.destroy()
     
     hourlyChartRef.current = new Chart(hourlyCtx, {
-      type: 'bar',
+      type: chartConfig.hourlyDistribution.type,
       data: {
         labels: Array.from({length: 24}, (_, i) => `${i}:00`),
         datasets: [{
           label: 'Requests',
           data: statsData.hourlyDistribution,
-          backgroundColor: '#58a6ff',
+          backgroundColor: chartConfig.hourlyDistribution.color,
           borderRadius: 4
         }]
       },
@@ -163,10 +119,10 @@ export default function App() {
         plugins: { legend: { display: false } }
       }
     })
-  }
+  }, [chartConfig])
 
   // 渲染 Token 趋势图
-  const renderTokenTrendChart = (data: TokenTrendPoint[]) => {
+  const renderTokenTrendChart = useCallback((data: typeof tokenTrendData) => {
     const ctx = document.getElementById('token-trend-chart') as HTMLCanvasElement
     if (tokenTrendChartRef.current) tokenTrendChartRef.current.destroy()
 
@@ -175,14 +131,14 @@ export default function App() {
     }))
 
     tokenTrendChartRef.current = new Chart(ctx, {
-      type: 'line',
+      type: chartConfig.tokenTrend.type,
       data: {
         labels,
         datasets: [
           {
             label: 'Input Tokens',
             data: data.map(d => d.input),
-            borderColor: '#58a6ff',
+            borderColor: chartConfig.tokenTrend.colors.input,
             backgroundColor: 'rgba(88, 166, 255, 0.1)',
             fill: true,
             tension: 0.4
@@ -190,7 +146,7 @@ export default function App() {
           {
             label: 'Output Tokens',
             data: data.map(d => d.output),
-            borderColor: '#3fb950',
+            borderColor: chartConfig.tokenTrend.colors.output,
             backgroundColor: 'rgba(63, 185, 80, 0.1)',
             fill: true,
             tension: 0.4
@@ -207,32 +163,14 @@ export default function App() {
         }
       }
     })
-  }
+  }, [chartConfig])
 
-  // 显示分析详情
-  const showAnalysis = async (runId: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/analysis?runId=${runId}`)
-      const result = await res.json()
-      
-      // 检查错误响应
-      if ('error' in result && result.error) {
-        alert(`Failed: ${result.error}`)
-        return
-      }
-
-      const analysis: Analysis = result
-      setSelectedAnalysis(analysis)
-      setActiveTab('token')
-    } catch (error) {
-      alert(`Failed: ${error}`)
-    }
-  }
-
-  // WebSocket 连接
+  // WebSocket 连接模拟
   useEffect(() => {
-    // 模拟 WebSocket 连接
-    const timer = setTimeout(() => setWsConnected(true), 1000)
+    const timer = setTimeout(() => {
+      // 这里可以设置实际的 WebSocket 连接状态
+      // useSetAtom(wsConnectedAtom)(true)
+    }, 1000)
     return () => clearTimeout(timer)
   }, [])
 
@@ -246,7 +184,21 @@ export default function App() {
   // 趋势周期变化
   useEffect(() => {
     if (stats) loadTokenTrend()
-  }, [trendPeriod])
+  }, [trendPeriod, stats, loadTokenTrend])
+
+  // 监听 stats 变化更新图表
+  useEffect(() => {
+    if (stats) {
+      handleUpdateCharts(stats)
+    }
+  }, [stats, handleUpdateCharts])
+
+  // 监听 tokenTrendData 变化渲染趋势图
+  useEffect(() => {
+    if (tokenTrendData.length > 0) {
+      renderTokenTrendChart(tokenTrendData)
+    }
+  }, [tokenTrendData, renderTokenTrendChart])
 
   // 导出 JSON
   const handleExportJson = () => {
@@ -261,11 +213,6 @@ export default function App() {
   // 应用过滤
   const handleApplyFilters = () => {
     loadRequests()
-  }
-
-  // 清除过滤
-  const handleClearFilters = () => {
-    setFilters({ session: '', provider: '', model: '' })
   }
 
   // 清除搜索
@@ -334,7 +281,7 @@ export default function App() {
 
       {/* Controls */}
       <div className="controls">
-        <button className="btn btn-primary" onClick={loadData}>🔄 Refresh</button>
+        <button className="btn btn-primary" onClick={refreshAll}>🔄 Refresh</button>
         <button className="btn" onClick={handleExportJson}>📥 Export JSON</button>
         <button className="btn" onClick={handleExportCsv}>📊 Export CSV</button>
         <div className="filter-group">
@@ -363,7 +310,7 @@ export default function App() {
             ))}
           </select>
           <button className="btn" onClick={handleApplyFilters}>Apply</button>
-          <button className="btn" onClick={handleClearFilters}>Clear</button>
+          <button className="btn" onClick={clearFilters}>Clear</button>
         </div>
       </div>
 
@@ -406,19 +353,19 @@ export default function App() {
       <div className="card">
         <div className="card-header">
           📋 Recent Requests
-          <span className="request-count">{requests.length}</span>
+          <span className="request-count">{requestCount}</span>
         </div>
         <div className="requests-list" id="requests-list">
           {loading ? (
             <div className="loading">Loading requests...</div>
-          ) : requests.length === 0 ? (
+          ) : filteredRequests.length === 0 ? (
             <div className="empty-state">No requests found</div>
           ) : (
-            requests.map(req => (
+            filteredRequests.map(req => (
               <div
                 key={req.runId}
                 className="request-item"
-                onClick={() => showAnalysis(req.runId)}
+                onClick={() => loadAnalysis(req.runId)}
               >
                 <div className="request-header">
                   <span className="request-provider">{req.provider} / {req.model}</span>
@@ -438,12 +385,12 @@ export default function App() {
       </div>
 
       {/* Analysis Modal */}
-      {selectedAnalysis && (
-        <div className="modal-overlay active" onClick={() => setSelectedAnalysis(null)}>
+      {analysisModalOpen && selectedAnalysis && (
+        <div className="modal-overlay active" onClick={closeAnalysisModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">Analysis: {selectedAnalysis.provider} / {selectedAnalysis.model}</h2>
-              <button className="modal-close" onClick={() => setSelectedAnalysis(null)}>&times;</button>
+              <button className="modal-close" onClick={closeAnalysisModal}>&times;</button>
             </div>
             <div className="modal-body">
               <div className="tabs">
