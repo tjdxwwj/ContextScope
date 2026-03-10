@@ -608,23 +608,71 @@ export class RequestAnalyzerService {
   }
 
   /**
-   * 当 API 没有返回 usage 时，估算 token 数量
+   * 估算消息数组的 token 数量
+   */
+  private estimateMessagesTokens(messages: any[]): number {
+    if (!messages || messages.length === 0) return 0;
+    
+    let total = 0;
+    messages.forEach(msg => {
+      if (typeof msg.content === 'string') {
+        total += this.estimateTokens(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        // 处理多模态消息
+        msg.content.forEach((item: any) => {
+          if (item.type === 'text' && item.text) {
+            total += this.estimateTokens(item.text);
+          }
+        });
+      }
+    });
+    
+    return total;
+  }
+
+  /**
+   * 当 API 没有返回 usage 时，根据完整上下文估算 token 数量
    */
   private estimateUsage(data: any): void {
     if (!data.usage || data.usage.totalTokens === 0) {
-      // 估算 output tokens
-      const content = data.assistantTexts?.join('\n') || '';
-      const estimatedOutput = this.estimateTokens(content);
+      let estimatedInput = 0;
+      let estimatedOutput = 0;
       
+      // 估算 input tokens（system prompt + history + current prompt）
+      if (data.systemPrompt) {
+        estimatedInput += this.estimateTokens(data.systemPrompt);
+        this.logger.debug?.(`System prompt: ${this.estimateTokens(data.systemPrompt)} tokens`);
+      }
+      
+      if (data.historyMessages && data.historyMessages.length > 0) {
+        const historyTokens = this.estimateMessagesTokens(data.historyMessages);
+        estimatedInput += historyTokens;
+        this.logger.debug?.(`History messages: ${historyTokens} tokens`);
+      }
+      
+      if (data.prompt) {
+        const promptTokens = this.estimateTokens(data.prompt);
+        estimatedInput += promptTokens;
+        this.logger.debug?.(`Current prompt: ${promptTokens} tokens`);
+      }
+      
+      // 估算 output tokens
+      if (data.assistantTexts && data.assistantTexts.length > 0) {
+        const content = data.assistantTexts.join('\n');
+        estimatedOutput = this.estimateTokens(content);
+        this.logger.debug?.(`Assistant response: ${estimatedOutput} tokens`);
+      }
+      
+      // 更新 usage
       data.usage = {
-        input: data.usage?.input || 0,
+        input: estimatedInput,
         output: estimatedOutput,
         cacheRead: 0,
         cacheWrite: 0,
-        total: (data.usage?.input || 0) + estimatedOutput
+        total: estimatedInput + estimatedOutput
       };
       
-      this.logger.debug?.(`Estimated ${estimatedOutput} tokens for run ${data.runId}`);
+      this.logger.info?.(`Estimated tokens for run ${data.runId}: input=${estimatedInput}, output=${estimatedOutput}, total=${estimatedInput + estimatedOutput}`);
     }
   }
 
