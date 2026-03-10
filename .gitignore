@@ -3,3 +3,4 @@ dist/
 *.db
 *.log
 .DS_Store
+openclaw.local-test.json

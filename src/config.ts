@@ -100,9 +100,9 @@ export const configSchema = {
         },
         maxPromptLength: {
           type: 'number',
-          minimum: 100,
-          maximum: 100000,
-          default: 10000
+          minimum: 0,
+          maximum: 5000000,
+          default: 0
         }
       }
     },

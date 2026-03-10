@@ -4,7 +4,7 @@
  * Core service that handles request analysis, statistics, and alerts
  */
 
-import type { RequestAnalyzerStorage } from './storage.js';
+import type { RequestAnalyzerStorage, SubagentLinkData, ToolCallData } from './storage.js';
 import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
 
@@ -92,6 +92,7 @@ export interface DetailedAnalysis {
   provider: string;
   model: string;
   timestamp: number;
+  subagentLinks: SubagentLinkData[];
   tokenBreakdown: TokenVisualization;
   heatmap: HeatmapData;
   timeline: TimelineData;
@@ -187,6 +188,41 @@ export class RequestAnalyzerService {
     }
   }
 
+  async captureSubagentLink(data: SubagentLinkData): Promise<void> {
+    try {
+      await this.storage.captureSubagentLink(data);
+      this.logger.debug?.(`Captured subagent link ${data.parentRunId} -> ${data.childRunId}`);
+    } catch (error) {
+      this.logger.error(`Failed to capture subagent link: ${error}`);
+      throw error;
+    }
+  }
+
+  async updateSubagentLinkByChildRunId(params: {
+    childRunId: string;
+    patch: Partial<Pick<SubagentLinkData, 'endedAt' | 'outcome' | 'error' | 'metadata'>>;
+  }): Promise<void> {
+    try {
+      await this.storage.updateSubagentLinkByChildRunId(params);
+    } catch (error) {
+      this.logger.error(`Failed to update subagent link: ${error}`);
+      throw error;
+    }
+  }
+
+  async captureToolCall(data: ToolCallData): Promise<void> {
+    try {
+      if (this.config.capture?.anonymizeContent) {
+        data = this.anonymizeAny(data) as ToolCallData;
+      }
+      await this.storage.captureToolCall(data);
+      this.logger.debug?.(`Captured tool call ${data.toolName} for run ${data.runId}`);
+    } catch (error) {
+      this.logger.error(`Failed to capture tool call: ${error}`);
+      throw error;
+    }
+  }
+
   async checkAlerts(context: AlertContext): Promise<void> {
     if (!this.config.alerts?.enabled) return;
 
@@ -264,6 +300,28 @@ export class RequestAnalyzerService {
     return await this.storage.getRequests(filters);
   }
 
+  async getSubagentLinks(filters: {
+    parentRunId?: string;
+    childRunId?: string;
+    parentSessionId?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<SubagentLinkData[]> {
+    return await this.storage.getSubagentLinks(filters);
+  }
+
+  async getToolCalls(filters: {
+    runId?: string;
+    sessionId?: string;
+    toolName?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<ToolCallData[]> {
+    return await this.storage.getToolCalls(filters);
+  }
+
   async getStorageStats(): Promise<any> {
     return await this.storage.getStats();
   }
@@ -271,10 +329,11 @@ export class RequestAnalyzerService {
   async getDetailedAnalysis(runId: string): Promise<DetailedAnalysis | null> {
     try {
       // Get the main request
-      const requests = await this.storage.getRequests({ runId, limit: 100 });
+      const requests = await this.storage.getRequests({ runId, limit: 1000 });
       if (requests.length === 0) return null;
 
       const mainRequest = requests.find(r => r.type === 'input') || requests[0];
+      const subagentLinks = await this.storage.getSubagentLinks({ parentRunId: runId, limit: 1000 });
       
       // Run analysis
       const analysis = this.analyzer.analyzeRequest(mainRequest, requests);
@@ -342,6 +401,7 @@ export class RequestAnalyzerService {
         provider: mainRequest.provider,
         model: mainRequest.model,
         timestamp: mainRequest.timestamp,
+        subagentLinks,
         tokenBreakdown,
         heatmap,
         timeline,
@@ -449,7 +509,31 @@ export class RequestAnalyzerService {
       );
     }
 
+    if (anonymized.historyMessages) {
+      anonymized.historyMessages = this.anonymizeAny(anonymized.historyMessages);
+    }
+
     return anonymized;
+  }
+
+  private anonymizeAny(value: unknown, depth: number = 0): unknown {
+    if (depth > 8) return undefined;
+    if (typeof value === 'string') return this.anonymizeText(value);
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return value;
+    if (Array.isArray(value)) {
+      return value.slice(0, 200).map(v => this.anonymizeAny(v, depth + 1));
+    }
+    if (typeof value === 'object') {
+      const input = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      const entries = Object.entries(input).slice(0, 200);
+      for (const [k, v] of entries) {
+        out[k] = this.anonymizeAny(v, depth + 1);
+      }
+      return out;
+    }
+    return undefined;
   }
 
   private anonymizeText(text: string): string {

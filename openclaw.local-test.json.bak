@@ -1,0 +1,39 @@
+{
+  "gateway": {
+    "port": 18789
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": ["contextscope"],
+    "load": {
+      "paths": ["D:\\code\\request-analyzer"]
+    },
+    "entries": {
+      "contextscope": {
+        "enabled": true,
+        "config": {
+          "storage": {
+            "maxRequests": 20000,
+            "retentionDays": 7,
+            "compression": true
+          },
+          "capture": {
+            "includeSystemPrompts": true,
+            "includeMessageHistory": true,
+            "anonymizeContent": false,
+            "maxPromptLength": 20000
+          },
+          "alerts": {
+            "enabled": false
+          },
+          "visualization": {
+            "theme": "dark",
+            "autoRefresh": true,
+            "refreshInterval": 5000
+          }
+        }
+      }
+    }
+  }
+}
+

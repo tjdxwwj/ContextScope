@@ -19,6 +19,7 @@ export interface RequestData {
   type: 'input' | 'output';
   runId: string;
   sessionId: string;
+  sessionKey?: string;
   provider: string;
   model: string;
   timestamp: number;
@@ -34,6 +35,41 @@ export interface RequestData {
     total?: number;
   };
   imagesCount?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SubagentLinkData {
+  id?: number;
+  kind?: 'spawn' | 'send';
+  parentRunId: string;
+  childRunId?: string;
+  parentSessionId?: string;
+  parentSessionKey?: string;
+  childSessionKey?: string;
+  runtime?: 'subagent' | 'acp';
+  mode?: 'run' | 'session';
+  label?: string;
+  toolCallId?: string;
+  timestamp: number;
+  endedAt?: number;
+  outcome?: 'success' | 'error' | 'timeout' | 'aborted' | 'unknown';
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ToolCallData {
+  id?: number;
+  runId: string;
+  sessionId?: string;
+  sessionKey?: string;
+  toolName: string;
+  toolCallId?: string;
+  timestamp: number;
+  startedAt?: number;
+  durationMs?: number;
+  params?: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -57,9 +93,13 @@ export interface StorageOptions {
 export class RequestAnalyzerStorage {
   private dataFile: string;
   private requests: RequestData[] = [];
+  private subagentLinks: SubagentLinkData[] = [];
+  private toolCalls: ToolCallData[] = [];
   private options: StorageOptions;
   private initialized = false;
   private nextId = 1;
+  private nextLinkId = 1;
+  private nextToolCallId = 1;
 
   constructor(options: StorageOptions) {
     this.options = options;
@@ -81,7 +121,11 @@ export class RequestAnalyzerStorage {
         const content = fs.readFileSync(this.dataFile, 'utf-8');
         const data = JSON.parse(content);
         this.requests = data.requests || [];
+        this.subagentLinks = data.subagentLinks || [];
+        this.toolCalls = data.toolCalls || [];
         this.nextId = data.nextId || (this.requests.length > 0 ? Math.max(...this.requests.map(r => r.id || 0)) + 1 : 1);
+        this.nextLinkId = data.nextLinkId || (this.subagentLinks.length > 0 ? Math.max(...this.subagentLinks.map(r => r.id || 0)) + 1 : 1);
+        this.nextToolCallId = data.nextToolCallId || (this.toolCalls.length > 0 ? Math.max(...this.toolCalls.map(r => r.id || 0)) + 1 : 1);
       }
 
       this.initialized = true;
@@ -98,7 +142,11 @@ export class RequestAnalyzerStorage {
     try {
       const data = {
         requests: this.requests,
+        subagentLinks: this.subagentLinks,
+        toolCalls: this.toolCalls,
         nextId: this.nextId,
+        nextLinkId: this.nextLinkId,
+        nextToolCallId: this.nextToolCallId,
         lastUpdated: Date.now()
       };
       fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8');
@@ -126,6 +174,72 @@ export class RequestAnalyzerStorage {
       
     } catch (error) {
       this.options.logger.error(`Failed to capture request: ${error}`);
+      throw error;
+    }
+  }
+
+  async captureSubagentLink(data: SubagentLinkData): Promise<void> {
+    if (!this.initialized) await this.initialize();
+
+    try {
+      const recordWithId: SubagentLinkData = {
+        ...data,
+        kind: data.kind ?? 'spawn',
+        outcome: data.outcome ?? undefined,
+        id: this.nextLinkId++
+      };
+
+      this.subagentLinks.unshift(recordWithId);
+      this.cleanupOldRequests();
+      await this.persist();
+    } catch (error) {
+      this.options.logger.error(`Failed to capture subagent link: ${error}`);
+      throw error;
+    }
+  }
+
+  async updateSubagentLinkByChildRunId(params: {
+    childRunId: string;
+    patch: Partial<Pick<SubagentLinkData, 'endedAt' | 'outcome' | 'error' | 'metadata'>>;
+  }): Promise<void> {
+    if (!this.initialized) await this.initialize();
+
+    const childRunId = params.childRunId.trim();
+    if (!childRunId) {
+      return;
+    }
+
+    const idx = this.subagentLinks.findIndex(r => r.childRunId === childRunId);
+    if (idx < 0) {
+      return;
+    }
+
+    const current = this.subagentLinks[idx];
+    const next: SubagentLinkData = {
+      ...current,
+      ...params.patch,
+      metadata: {
+        ...(current.metadata || {}),
+        ...(params.patch.metadata || {})
+      }
+    };
+    this.subagentLinks[idx] = next;
+    await this.persist();
+  }
+
+  async captureToolCall(data: ToolCallData): Promise<void> {
+    if (!this.initialized) await this.initialize();
+
+    try {
+      const recordWithId: ToolCallData = {
+        ...data,
+        id: this.nextToolCallId++
+      };
+      this.toolCalls.unshift(recordWithId);
+      this.cleanupOldRequests();
+      await this.persist();
+    } catch (error) {
+      this.options.logger.error(`Failed to capture tool call: ${error}`);
       throw error;
     }
   }
@@ -166,6 +280,66 @@ export class RequestAnalyzerStorage {
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
 
+    return filtered.slice(offset, offset + limit);
+  }
+
+  async getToolCalls(filters: {
+    runId?: string;
+    sessionId?: string;
+    toolName?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<ToolCallData[]> {
+    if (!this.initialized) await this.initialize();
+
+    let filtered = [...this.toolCalls];
+
+    if (filters.runId) {
+      filtered = filtered.filter(r => r.runId === filters.runId);
+    }
+    if (filters.sessionId) {
+      filtered = filtered.filter(r => r.sessionId === filters.sessionId);
+    }
+    if (filters.toolName) {
+      filtered = filtered.filter(r => r.toolName === filters.toolName);
+    }
+    if (filters.startTime) {
+      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
+    }
+    if (filters.endTime) {
+      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
+    }
+
+    const offset = filters.offset || 0;
+    const limit = filters.limit || 100;
+    return filtered.slice(offset, offset + limit);
+  }
+
+  async getSubagentLinks(filters: {
+    parentRunId?: string;
+    childRunId?: string;
+    parentSessionId?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<SubagentLinkData[]> {
+    if (!this.initialized) await this.initialize();
+
+    let filtered = [...this.subagentLinks];
+
+    if (filters.parentRunId) {
+      filtered = filtered.filter(r => r.parentRunId === filters.parentRunId);
+    }
+    if (filters.childRunId) {
+      filtered = filtered.filter(r => r.childRunId === filters.childRunId);
+    }
+    if (filters.parentSessionId) {
+      filtered = filtered.filter(r => r.parentSessionId === filters.parentSessionId);
+    }
+
+    const offset = filters.offset || 0;
+    const limit = filters.limit || 100;
     return filtered.slice(offset, offset + limit);
   }
 
@@ -215,10 +389,18 @@ export class RequestAnalyzerStorage {
     
     // Remove old requests
     this.requests = this.requests.filter(r => r.timestamp >= cutoffTime);
+    this.subagentLinks = this.subagentLinks.filter(r => r.timestamp >= cutoffTime);
+    this.toolCalls = this.toolCalls.filter(r => r.timestamp >= cutoffTime);
     
     // Remove excess requests if over limit
     if (this.requests.length > this.options.maxRequests) {
       this.requests = this.requests.slice(0, this.options.maxRequests);
+    }
+    if (this.subagentLinks.length > this.options.maxRequests) {
+      this.subagentLinks = this.subagentLinks.slice(0, this.options.maxRequests);
+    }
+    if (this.toolCalls.length > this.options.maxRequests) {
+      this.toolCalls = this.toolCalls.slice(0, this.options.maxRequests);
     }
   }
 

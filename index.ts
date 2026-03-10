@@ -86,16 +86,19 @@ const plugin = {
     // Register hooks for capturing requests
     api.on('llm_input', async (event, ctx) => {
       try {
+        const includeSystemPrompts = config.capture?.includeSystemPrompts !== false;
+        const includeMessageHistory = config.capture?.includeMessageHistory !== false;
         await service.captureRequest({
           type: 'input',
           runId: event.runId,
           sessionId: event.sessionId,
+          sessionKey: ctx.sessionKey,
           provider: event.provider,
           model: event.model,
           timestamp: Date.now(),
           prompt: event.prompt,
-          systemPrompt: event.systemPrompt,
-          historyMessages: event.historyMessages,
+          systemPrompt: includeSystemPrompts ? event.systemPrompt : undefined,
+          historyMessages: includeMessageHistory ? event.historyMessages : undefined,
           imagesCount: event.imagesCount,
           metadata: {
             agentId: ctx.agentId,
@@ -114,6 +117,7 @@ const plugin = {
           type: 'output',
           runId: event.runId,
           sessionId: event.sessionId,
+          sessionKey: ctx.sessionKey,
           provider: event.provider,
           model: event.model,
           timestamp: Date.now(),
@@ -138,6 +142,145 @@ const plugin = {
       } catch (error)
       {
         api.logger.warn(`Failed to capture LLM output: ${error}`);
+      }
+    });
+
+    api.on('after_tool_call', async (event, ctx) => {
+      try {
+        const now = Date.now();
+        const runId = (event.runId || ctx.runId || '').trim();
+        if (runId) {
+          const durationMs = typeof event.durationMs === 'number' ? Math.max(0, event.durationMs) : undefined;
+          await service.captureToolCall({
+            runId,
+            sessionId: ctx.sessionId,
+            sessionKey: ctx.sessionKey,
+            toolName: event.toolName,
+            toolCallId: event.toolCallId || ctx.toolCallId,
+            timestamp: now,
+            startedAt: durationMs !== undefined ? now - durationMs : undefined,
+            durationMs,
+            params: event.params,
+            result: event.result,
+            error: event.error,
+            metadata: {
+              agentId: ctx.agentId
+            }
+          });
+        }
+
+        if (event.toolName === 'sessions_spawn') {
+          const parentRunId = runId;
+          if (!parentRunId) {
+            return;
+          }
+
+          const details =
+            event.result && typeof event.result === 'object'
+              ? ((event.result as any).details ?? event.result)
+              : undefined;
+
+          const childRunId = typeof details?.runId === 'string' ? details.runId.trim() : '';
+          if (!childRunId) {
+            return;
+          }
+
+          const childSessionKey =
+            typeof details?.childSessionKey === 'string' ? details.childSessionKey.trim() : undefined;
+          const runtimeParam =
+            typeof event.params?.runtime === 'string' ? event.params.runtime.trim() : '';
+          const runtime = runtimeParam === 'acp' || runtimeParam === 'subagent' ? runtimeParam : undefined;
+          const mode = details?.mode === 'run' || details?.mode === 'session' ? details.mode : undefined;
+          const label = typeof details?.label === 'string' ? details.label.trim() : undefined;
+
+          await service.captureSubagentLink({
+            kind: 'spawn',
+            parentRunId,
+            childRunId,
+            parentSessionId: ctx.sessionId,
+            parentSessionKey: ctx.sessionKey,
+            childSessionKey,
+            runtime,
+            mode,
+            label,
+            toolCallId: ctx.toolCallId,
+            timestamp: now,
+            metadata: {
+              agentId: ctx.agentId
+            }
+          });
+        }
+
+        if (event.toolName === 'sessions_send') {
+          const parentRunId = runId;
+          if (!parentRunId) {
+            return;
+          }
+          const details =
+            event.result && typeof event.result === 'object'
+              ? ((event.result as any).details ?? event.result)
+              : undefined;
+          const targetSessionKey =
+            typeof details?.sessionKey === 'string'
+              ? details.sessionKey.trim()
+              : typeof event.params?.sessionKey === 'string'
+                ? event.params.sessionKey.trim()
+                : undefined;
+          const sendRunId = typeof details?.runId === 'string' ? details.runId.trim() : undefined;
+
+          if (targetSessionKey) {
+            await service.captureSubagentLink({
+              kind: 'send',
+              parentRunId,
+              childRunId: sendRunId,
+              parentSessionId: ctx.sessionId,
+              parentSessionKey: ctx.sessionKey,
+              childSessionKey: targetSessionKey,
+              toolCallId: ctx.toolCallId,
+              timestamp: now,
+              metadata: {
+                agentId: ctx.agentId
+              }
+            });
+          }
+        }
+      } catch (error) {
+        api.logger.warn(`Failed to capture subagent link: ${error}`);
+      }
+    });
+
+    api.on('subagent_ended', async (event, ctx) => {
+      try {
+        const childRunId = typeof event.runId === 'string' ? event.runId.trim() : '';
+        if (!childRunId) {
+          return;
+        }
+
+        const outcomeMap: Record<string, 'success' | 'error' | 'timeout' | 'aborted' | 'unknown'> = {
+          ok: 'success',
+          error: 'error',
+          timeout: 'timeout',
+          killed: 'aborted',
+          reset: 'aborted',
+          deleted: 'unknown'
+        };
+        const mapped = event.outcome ? outcomeMap[event.outcome] : undefined;
+
+        await service.updateSubagentLinkByChildRunId({
+          childRunId,
+          patch: {
+            endedAt: typeof event.endedAt === 'number' ? event.endedAt : Date.now(),
+            outcome: mapped ?? 'unknown',
+            error: typeof event.error === 'string' ? event.error : undefined,
+            metadata: {
+              targetSessionKey: event.targetSessionKey,
+              reason: event.reason,
+              targetKind: event.targetKind
+            }
+          }
+        });
+      } catch (error) {
+        api.logger.warn(`Failed to capture subagent ended: ${error}`);
       }
     });
 

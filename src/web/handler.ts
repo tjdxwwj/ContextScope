@@ -71,6 +71,14 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleExport(req, res, url);
       }
 
+      if (path === '/plugins/contextscope/api/links') {
+        return await handleLinks(req, res, url);
+      }
+
+      if (path === '/plugins/contextscope/api/tool-calls') {
+        return await handleToolCalls(req, res, url);
+      }
+
       if (path === '/plugins/contextscope/api/timeline/detail') {
         return await handleTimelineDetail(req, res, url);
       }
@@ -300,6 +308,72 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to get session analysis' }));
+      return true;
+    }
+  }
+
+  async function handleLinks(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const searchParams = url.searchParams;
+      const filters = {
+        parentRunId: searchParams.get('parentRunId') || undefined,
+        childRunId: searchParams.get('childRunId') || undefined,
+        parentSessionId: searchParams.get('parentSessionId') || undefined,
+        limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
+        offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
+      };
+
+      const links = await service.getSubagentLinks(filters);
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ links, total: links.length, filters }));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get links: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get links' }));
+      return true;
+    }
+  }
+
+  async function handleToolCalls(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const searchParams = url.searchParams;
+      const filters = {
+        runId: searchParams.get('runId') || undefined,
+        sessionId: searchParams.get('sessionId') || undefined,
+        toolName: searchParams.get('toolName') || undefined,
+        startTime: searchParams.get('startTime') ? parseInt(searchParams.get('startTime')!) : undefined,
+        endTime: searchParams.get('endTime') ? parseInt(searchParams.get('endTime')!) : undefined,
+        limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
+        offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
+      };
+
+      const toolCalls = await service.getToolCalls(filters);
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ toolCalls, total: toolCalls.length, filters }));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get tool calls: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get tool calls' }));
       return true;
     }
   }
