@@ -7,6 +7,7 @@
 import type { RequestAnalyzerStorage, SubagentLinkData, ToolCallData } from './storage.js';
 import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
+import { TokenEstimationService } from './token-estimator.js';
 
 interface PluginLogger {
   debug?: (message: string) => void;
@@ -142,6 +143,7 @@ export class RequestAnalyzerService {
   private config: PluginConfig;
   private logger: PluginLogger;
   private analyzer: ContextAnalyzer;
+  private tokenEstimator: TokenEstimationService;
 
   constructor(params: {
     storage: RequestAnalyzerStorage;
@@ -152,6 +154,7 @@ export class RequestAnalyzerService {
     this.config = params.config;
     this.logger = params.logger;
     this.analyzer = new ContextAnalyzer();
+    this.tokenEstimator = new TokenEstimationService();
   }
 
   async captureRequest(data: any): Promise<void> {
@@ -180,8 +183,14 @@ export class RequestAnalyzerService {
         data = this.anonymizeContent(data);
       }
 
-      // 当 API 没有返回 usage 时，估算 token 数量
-      this.estimateUsage(data);
+      // 当 API 没有返回 usage 时，使用服务端估算器估算 token 数量
+      const estimate = this.tokenEstimator.estimateUsage(data);
+      if (estimate) {
+        this.logger.info?.(
+          `Estimated tokens for run ${data.runId}: ` +
+          `input=${estimate.input}, output=${estimate.output}, total=${estimate.total}`
+        );
+      }
 
       await this.storage.captureRequest(data);
       this.logger.debug?.(`Captured response for run ${data.runId}`);
