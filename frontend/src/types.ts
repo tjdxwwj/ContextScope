@@ -118,6 +118,34 @@ export interface Analysis {
   }>
 }
 
+// 时间线详情类型
+export interface TimelinePointDetail {
+  timestamp: number
+  tokens: number
+  messages: number
+  utilization: number
+  summaryApplied: boolean
+  contextSnapshot: ContextMessage[]
+  comparison?: {
+    prevTimestamp?: number
+    messagesDelta: number
+    tokensDelta: number
+    utilizationDelta: number
+    addedMessages: ContextMessage[]
+    removedMessages: ContextMessage[]
+  }
+}
+
+export interface ContextMessage {
+  id: string
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string
+  tokens: number
+  timestamp: number
+  type?: string
+  status?: 'success' | 'error' | 'pending'
+}
+
 export interface TokenTrendPoint {
   timestamp: number
   input: number

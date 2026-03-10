@@ -1,6 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import Chart from 'chart.js/auto'
+import { EnhancedTimeline } from './components/EnhancedTimeline'
+import { TimelineDetail } from './components/TimelineDetail'
 import {
   // 状态 atoms
   loadingAtom,
@@ -15,6 +17,7 @@ import {
   analysisModalOpenAtom,
   requestCountAtom,
   filteredRequestsAtom,
+  timelineDetailAtom,
   // API atoms
   loadStatsAtom,
   loadRequestsAtom,
@@ -45,6 +48,7 @@ export default function App() {
   const analysisModalOpen = useAtomValue(analysisModalOpenAtom)
   const requestCount = useAtomValue(requestCountAtom)
   const filteredRequests = useAtomValue(filteredRequestsAtom)
+  const timelineDetail = useAtomValue(timelineDetailAtom)
   const chartConfig = useAtomValue(chartConfigAtom)
 
   // 设置状态
@@ -52,6 +56,7 @@ export default function App() {
   const setFilters = useSetAtom(filtersAtom)
   const setTrendPeriod = useSetAtom(trendPeriodAtom)
   const setActiveTab = useSetAtom(activeTabAtom)
+  const setTimelineDetail = useSetAtom(timelineDetailAtom)
 
   // Actions
   const loadStats = useSetAtom(loadStatsAtom)
@@ -441,22 +446,12 @@ export default function App() {
                 {activeTab === 'timeline' && (
                   <div className="timeline-section">
                     <h3>📈 Context Window Utilization</h3>
-                    <div className="timeline-viz">
-                      {selectedAnalysis.timeline.points.map((point, idx) => {
-                        const utilizationPct = Math.round(point.utilization * 100)
-                        const colorClass = utilizationPct > 90 ? 'critical' : utilizationPct > 70 ? 'warning' : 'normal'
-                        return (
-                          <div key={idx} className={`timeline-point ${colorClass}`}>
-                            <div className="point-time">{new Date(point.timestamp).toLocaleTimeString()}</div>
-                            <div className="point-stats">
-                              <span>{point.tokens.toLocaleString()} tokens</span>
-                              <span>{point.messages} msgs</span>
-                              <span className={`utilization ${colorClass}`}>{utilizationPct}%</span>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                    <EnhancedTimeline
+                      points={selectedAnalysis.timeline.points}
+                      contextWindow={selectedAnalysis.timeline.contextWindow}
+                      onSelectPoint={(detail) => setTimelineDetail(detail)}
+                      selectedPoint={timelineDetail}
+                    />
                   </div>
                 )}
                 {activeTab === 'graph' && (
@@ -495,6 +490,14 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 时间线详情 Modal */}
+      {timelineDetail && (
+        <TimelineDetail
+          detail={timelineDetail}
+          onClose={() => setTimelineDetail(null)}
+        />
       )}
     </div>
   )

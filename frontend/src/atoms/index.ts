@@ -1,5 +1,5 @@
 import { atom } from 'jotai'
-import type { Stats, Request, Analysis, TokenTrendPoint } from '../types'
+import type { Stats, Request, Analysis, TokenTrendPoint, TimelinePointDetail } from '../types'
 
 // 加载状态
 export const loadingAtom = atom(true)
@@ -60,6 +60,9 @@ export const filteredRequestsAtom = atom((get) => {
 export const requestCountAtom = atom((get) => {
   return get(filteredRequestsAtom).length
 })
+
+// 时间线详情
+export const timelineDetailAtom = atom<TimelinePointDetail | null>(null)
 
 // 导出所有 atoms
 export * from './api'
