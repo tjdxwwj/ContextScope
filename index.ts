@@ -113,6 +113,16 @@ const plugin = {
 
     api.on('llm_output', async (event, ctx) => {
       try {
+        const rawUsage = event.usage;
+        const usage = rawUsage
+          ? {
+              input: rawUsage.input,
+              output: rawUsage.output,
+              cacheRead: rawUsage.cacheRead,
+              cacheWrite: rawUsage.cacheWrite,
+              total: rawUsage.total ?? (rawUsage as { totalTokens?: number }).totalTokens,
+            }
+          : undefined;
         await service.captureResponse({
           type: 'output',
           runId: event.runId,
@@ -122,7 +132,7 @@ const plugin = {
           model: event.model,
           timestamp: Date.now(),
           assistantTexts: event.assistantTexts,
-          usage: event.usage,
+          usage,
           metadata: {
             agentId: ctx.agentId,
             channelId: ctx.channelId
@@ -130,11 +140,11 @@ const plugin = {
         });
 
         // Check alerts
-        if (config.alerts?.enabled && event.usage) {
+        if (config.alerts?.enabled && usage) {
           await service.checkAlerts({
             runId: event.runId,
             sessionId: event.sessionId,
-            usage: event.usage,
+            usage,
             provider: event.provider,
             model: event.model
           });

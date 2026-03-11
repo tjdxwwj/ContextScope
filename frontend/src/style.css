@@ -31,6 +31,40 @@ body {
   padding: 20px;
 }
 
+.layout-two {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .layout-two {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card-left .card-body {
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.run-list .run-block {
+  margin-bottom: 8px;
+  border-radius: 8px;
+}
+
+.tool-calls-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-detail .progress-bar {
+  position: relative;
+  display: flex;
+}
+
 .header {
   display: flex;
   justify-content: space-between;
