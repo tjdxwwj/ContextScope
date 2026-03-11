@@ -93,6 +93,10 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleTimelineCompare(req, res, url);
       }
 
+      if (path === '/plugins/contextscope/api/context') {
+        return await handleContext(req, res, url);
+      }
+
       // Dashboard 主页面
       if (path === '/plugins/contextscope' || path === '/plugins/contextscope/') {
         return await handleDashboard(req, res);
@@ -530,6 +534,49 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to compare timeline points' }));
+      return true;
+    }
+  }
+
+  /**
+   * Handle context distribution API request
+   * GET /plugins/contextscope/api/context?runId=xxx
+   */
+  async function handleContext(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const runId = url.searchParams.get('runId');
+      
+      if (!runId) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'runId parameter is required' }));
+        return true;
+      }
+
+      const context = await service.getContextDistribution(runId);
+      
+      if (!context) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Context distribution not found' }));
+        return true;
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(context));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get context distribution: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get context distribution' }));
       return true;
     }
   }

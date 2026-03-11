@@ -1,0 +1,58 @@
+{
+  "requests": [
+    {
+      "type": "input",
+      "runId": "test-context-1773250903869",
+      "sessionId": "test-session",
+      "provider": "bailian",
+      "model": "qwen3.5-plus",
+      "timestamp": 1773250903870,
+      "prompt": "你好，测试上下文分布 API",
+      "systemPrompt": "You are a helpful assistant. This is a test system prompt.",
+      "historyMessages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hello"
+            }
+          ],
+          "timestamp": 1773250843870
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hi!"
+            }
+          ],
+          "timestamp": 1773250848870
+        }
+      ],
+      "usage": {
+        "input": 100,
+        "output": 50,
+        "total": 150
+      },
+      "id": 8
+    },
+    {
+      "type": "input",
+      "runId": "test-123",
+      "sessionId": "test",
+      "provider": "test",
+      "model": "test",
+      "timestamp": 1773250846275,
+      "prompt": "test",
+      "id": 7
+    }
+  ],
+  "subagentLinks": [],
+  "toolCalls": [],
+  "nextId": 9,
+  "nextLinkId": 1,
+  "nextToolCallId": 1,
+  "lastUpdated": 1773250941807
+}

@@ -886,4 +886,170 @@ export class RequestAnalyzerService {
       removedMessages: [] as any[]
     };
   }
+
+  /**
+   * 获取完整的上下文分布信息
+   * 包含 system prompt, user prompt, history, token distribution 等
+   */
+  async getContextDistribution(runId: string): Promise<ContextDistributionResponse | null> {
+    try {
+      const requests = await this.storage.getRequests({ runId, limit: 1000 });
+      if (requests.length === 0) return null;
+
+      const mainRequest = requests.find(r => r.type === 'input') || requests[0];
+      
+      // 构建完整的上下文
+      const systemPrompt = mainRequest.systemPrompt || '';
+      const userPrompt = mainRequest.prompt || '';
+      const historyMessages = mainRequest.historyMessages || [];
+      
+      // 计算各部分的 token 分布
+      const tokenDistribution = await this.calculateTokenDistribution(
+        systemPrompt,
+        userPrompt,
+        historyMessages
+      );
+
+      // 构建响应
+      return {
+        runId: mainRequest.runId,
+        sessionId: mainRequest.sessionId,
+        provider: mainRequest.provider,
+        model: mainRequest.model,
+        timestamp: mainRequest.timestamp,
+        
+        // 完整上下文内容
+        context: {
+          systemPrompt,
+          userPrompt,
+          history: historyMessages,
+          toolCalls: await this.storage.getToolCalls({ runId, limit: 1000 }),
+          subagentLinks: await this.storage.getSubagentLinks({ parentRunId: runId, limit: 1000 })
+        },
+        
+        // Token 分布
+        tokenDistribution,
+        
+        // 模型信息
+        modelInfo: {
+          name: mainRequest.model,
+          provider: mainRequest.provider,
+          contextWindow: this.getModelContextWindow(mainRequest.model),
+          estimatedCost: this.estimateCost(
+            { total: tokenDistribution.total },
+            mainRequest.provider,
+            mainRequest.model
+          )
+        },
+        
+        // 统计信息
+        stats: {
+          totalMessages: historyMessages.length + 1, // +1 for current prompt
+          totalTokens: tokenDistribution.total,
+          systemPromptPercentage: tokenDistribution.percentages.systemPrompt,
+          historyPercentage: tokenDistribution.percentages.history,
+          userPromptPercentage: tokenDistribution.percentages.userPrompt,
+          toolResponsesPercentage: tokenDistribution.percentages.toolResponses
+        }
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get context distribution: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 计算 Token 分布
+   */
+  private async calculateTokenDistribution(
+    systemPrompt: string,
+    userPrompt: string,
+    historyMessages: any[]
+  ): Promise<TokenDistribution> {
+    const systemTokens = this.estimateTokens(systemPrompt);
+    const userPromptTokens = this.estimateTokens(userPrompt);
+    const historyTokens = this.estimateMessagesTokens(historyMessages);
+    
+    // 计算工具响应的 tokens
+    let toolResponseTokens = 0;
+    historyMessages.forEach(msg => {
+      if (msg.role === 'tool' || msg.role === 'toolResult') {
+        if (typeof msg.content === 'string') {
+          toolResponseTokens += this.estimateTokens(msg.content);
+        }
+      }
+    });
+
+    const total = systemTokens + userPromptTokens + historyTokens;
+
+    return {
+      total,
+      breakdown: {
+        systemPrompt: systemTokens,
+        userPrompt: userPromptTokens,
+        history: historyTokens,
+        toolResponses: toolResponseTokens
+      },
+      percentages: {
+        systemPrompt: total > 0 ? Math.round((systemTokens / total) * 100) : 0,
+        userPrompt: total > 0 ? Math.round((userPromptTokens / total) * 100) : 0,
+        history: total > 0 ? Math.round((historyTokens / total) * 100) : 0,
+        toolResponses: total > 0 ? Math.round((toolResponseTokens / total) * 100) : 0
+      }
+    };
+  }
+}
+
+export interface ContextDistributionResponse {
+  runId: string;
+  sessionId: string;
+  provider: string;
+  model: string;
+  timestamp: number;
+  
+  // 完整上下文内容
+  context: {
+    systemPrompt: string;
+    userPrompt: string;
+    history: any[];
+    toolCalls: ToolCallData[];
+    subagentLinks: SubagentLinkData[];
+  };
+  
+  // Token 分布
+  tokenDistribution: TokenDistribution;
+  
+  // 模型信息
+  modelInfo: {
+    name: string;
+    provider: string;
+    contextWindow: number;
+    estimatedCost: number;
+  };
+  
+  // 统计信息
+  stats: {
+    totalMessages: number;
+    totalTokens: number;
+    systemPromptPercentage: number;
+    historyPercentage: number;
+    userPromptPercentage: number;
+    toolResponsesPercentage: number;
+  };
+}
+
+export interface TokenDistribution {
+  total: number;
+  breakdown: {
+    systemPrompt: number;
+    userPrompt: number;
+    history: number;
+    toolResponses: number;
+  };
+  percentages: {
+    systemPrompt: number;
+    userPrompt: number;
+    history: number;
+    toolResponses: number;
+  };
 }
