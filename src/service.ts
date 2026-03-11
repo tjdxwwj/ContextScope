@@ -7,6 +7,8 @@
 import type { RequestAnalyzerStorage, SubagentLinkData, ToolCallData } from './storage.js';
 import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
+import { TokenEstimationService } from './token-estimator.js';
+import type { ChainResponse, ChainItem, ChainStats } from './types-chain.js';
 
 interface PluginLogger {
   debug?: (message: string) => void;
@@ -142,6 +144,7 @@ export class RequestAnalyzerService {
   private config: PluginConfig;
   private logger: PluginLogger;
   private analyzer: ContextAnalyzer;
+  private tokenEstimator: TokenEstimationService;
 
   constructor(params: {
     storage: RequestAnalyzerStorage;
@@ -152,6 +155,7 @@ export class RequestAnalyzerService {
     this.config = params.config;
     this.logger = params.logger;
     this.analyzer = new ContextAnalyzer();
+    this.tokenEstimator = new TokenEstimationService();
   }
 
   async captureRequest(data: any): Promise<void> {
@@ -178,6 +182,15 @@ export class RequestAnalyzerService {
     try {
       if (this.config.capture?.anonymizeContent) {
         data = this.anonymizeContent(data);
+      }
+
+      // 当 API 没有返回 usage 时，使用服务端估算器估算 token 数量
+      const estimate = this.tokenEstimator.estimateUsage(data);
+      if (estimate) {
+        this.logger.info?.(
+          `Estimated tokens for run ${data.runId}: ` +
+          `input=${estimate.input}, output=${estimate.output}, total=${estimate.total}`
+        );
       }
 
       await this.storage.captureRequest(data);
@@ -591,6 +604,89 @@ export class RequestAnalyzerService {
   }
 
   /**
+   * 估算文本的 token 数量
+   * 中文：约 1.5 个字符 = 1 个 token
+   * 英文：约 4 个字符 = 1 个 token
+   */
+  private estimateTokens(text: string): number {
+    if (!text) return 0;
+    
+    const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+    const otherChars = text.length - chineseChars;
+    
+    return Math.round(chineseChars / 1.5 + otherChars / 4);
+  }
+
+  /**
+   * 估算消息数组的 token 数量
+   */
+  private estimateMessagesTokens(messages: any[]): number {
+    if (!messages || messages.length === 0) return 0;
+    
+    let total = 0;
+    messages.forEach(msg => {
+      if (typeof msg.content === 'string') {
+        total += this.estimateTokens(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        // 处理多模态消息
+        msg.content.forEach((item: any) => {
+          if (item.type === 'text' && item.text) {
+            total += this.estimateTokens(item.text);
+          }
+        });
+      }
+    });
+    
+    return total;
+  }
+
+  /**
+   * 当 API 没有返回 usage 时，根据完整上下文估算 token 数量
+   */
+  private estimateUsage(data: any): void {
+    if (!data.usage || data.usage.totalTokens === 0) {
+      let estimatedInput = 0;
+      let estimatedOutput = 0;
+      
+      // 估算 input tokens（system prompt + history + current prompt）
+      if (data.systemPrompt) {
+        estimatedInput += this.estimateTokens(data.systemPrompt);
+        this.logger.debug?.(`System prompt: ${this.estimateTokens(data.systemPrompt)} tokens`);
+      }
+      
+      if (data.historyMessages && data.historyMessages.length > 0) {
+        const historyTokens = this.estimateMessagesTokens(data.historyMessages);
+        estimatedInput += historyTokens;
+        this.logger.debug?.(`History messages: ${historyTokens} tokens`);
+      }
+      
+      if (data.prompt) {
+        const promptTokens = this.estimateTokens(data.prompt);
+        estimatedInput += promptTokens;
+        this.logger.debug?.(`Current prompt: ${promptTokens} tokens`);
+      }
+      
+      // 估算 output tokens
+      if (data.assistantTexts && data.assistantTexts.length > 0) {
+        const content = data.assistantTexts.join('\n');
+        estimatedOutput = this.estimateTokens(content);
+        this.logger.debug?.(`Assistant response: ${estimatedOutput} tokens`);
+      }
+      
+      // 更新 usage
+      data.usage = {
+        input: estimatedInput,
+        output: estimatedOutput,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: estimatedInput + estimatedOutput
+      };
+      
+      this.logger.info?.(`Estimated tokens for run ${data.runId}: input=${estimatedInput}, output=${estimatedOutput}, total=${estimatedInput + estimatedOutput}`);
+    }
+  }
+
+  /**
    * 获取时间线详情（包含上下文快照）
    */
   async getTimelineDetail(runId: string, timestamp: number): Promise<any> {
@@ -637,6 +733,121 @@ export class RequestAnalyzerService {
       contextSnapshot,
       comparison
     };
+  }
+
+  /**
+   * Get raw call chain for a runId
+   * Returns tools, subagents, inputs, outputs without any analysis
+   */
+  async getChain(runId: string, limit = 100, offset = 0): Promise<ChainResponse | null> {
+    try {
+      const requests = await this.storage.getRequests({ runId, limit: 10000 });
+      if (requests.length === 0) return null;
+
+      const mainRequest = requests.find(r => r.type === 'input') || requests[0];
+      const subagentLinks = await this.storage.getSubagentLinks({ parentRunId: runId, limit: 1000 });
+      const toolCalls = await this.storage.getToolCalls({ runId, limit: 1000 });
+
+      const chainItems: ChainItem[] = [];
+
+      // Add requests
+      requests.forEach(req => {
+        chainItems.push({
+          id: req.runId,
+          runId: req.runId,
+          type: req.type as 'input' | 'output',
+          timestamp: req.timestamp,
+          input: req.type === 'input' ? { prompt: req.prompt, systemPrompt: req.systemPrompt, historyMessages: req.historyMessages } : undefined,
+          output: req.type === 'output' ? { assistantTexts: req.assistantTexts } : undefined,
+          usage: req.usage ? { input: req.usage.input || 0, output: req.usage.output || 0, total: req.usage.total || 0 } : undefined,
+          metadata: { provider: req.provider, model: req.model, status: 'success' }
+        });
+      });
+
+      // Add tool calls
+      toolCalls.forEach(tc => {
+        if (tc.params) {
+          chainItems.push({
+            id: tc.toolCallId || `tool_${tc.id}`,
+            runId: tc.runId,
+            type: 'tool_call',
+            timestamp: tc.timestamp,
+            duration: tc.durationMs,
+            input: { params: tc.params },
+            metadata: { toolName: tc.toolName, status: tc.error ? 'error' : 'success', error: tc.error }
+          });
+        }
+        if (tc.result !== undefined) {
+          chainItems.push({
+            id: tc.toolCallId || `tool_${tc.id}`,
+            runId: tc.runId,
+            type: 'tool_result',
+            timestamp: tc.timestamp + (tc.durationMs || 0),
+            output: { result: tc.result },
+            metadata: { toolName: tc.toolName, status: tc.error ? 'error' : 'success', error: tc.error }
+          });
+        }
+      });
+
+      // Add subagent links
+      subagentLinks.forEach(link => {
+        if (link.label || link.mode) {
+          chainItems.push({
+            id: link.childRunId || `subagent_${link.id}`,
+            runId: link.childRunId || '',
+            parentRunId: link.parentRunId,
+            type: 'subagent_spawn',
+            timestamp: link.timestamp,
+            input: { task: link.label },
+            metadata: { agentId: link.childSessionKey, status: 'success' }
+          });
+        }
+        if (link.endedAt || link.outcome) {
+          chainItems.push({
+            id: link.childRunId || `subagent_${link.id}`,
+            runId: link.childRunId || '',
+            parentRunId: link.parentRunId,
+            type: 'subagent_result',
+            timestamp: link.endedAt || link.timestamp,
+            duration: link.endedAt ? (link.endedAt - link.timestamp) : undefined,
+            output: { outcome: link.outcome },
+            metadata: { agentId: link.childSessionKey, status: link.outcome as any || 'success', error: link.error }
+          });
+        }
+      });
+
+      // Sort descending (most recent first)
+      chainItems.sort((a, b) => b.timestamp - a.timestamp);
+
+      // Stats
+      const stats: ChainStats = {
+        totalItems: chainItems.length,
+        inputCount: chainItems.filter(i => i.type === 'input').length,
+        outputCount: chainItems.filter(i => i.type === 'output').length,
+        toolCallCount: chainItems.filter(i => i.type === 'tool_call' || i.type === 'tool_result').length,
+        subagentCount: chainItems.filter(i => i.type === 'subagent_spawn' || i.type === 'subagent_result').length,
+        totalTokens: chainItems.reduce((sum, i) => sum + (i.usage?.total || 0), 0)
+      };
+
+      const paginatedChain = chainItems.slice(offset, offset + limit);
+      const endTime = requests.find(r => r.type === 'output')?.timestamp;
+
+      return {
+        runId,
+        sessionId: mainRequest.sessionId,
+        provider: mainRequest.provider,
+        model: mainRequest.model,
+        startTime: Math.min(...requests.map(r => r.timestamp)),
+        endTime: endTime || Math.max(...requests.map(r => r.timestamp)),
+        duration: endTime ? endTime - Math.min(...requests.map(r => r.timestamp)) : undefined,
+        pagination: { limit, offset, total: chainItems.length, hasMore: offset + limit < chainItems.length },
+        chain: paginatedChain,
+        stats
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get chain: ${error}`);
+      return null;
+    }
   }
 
   /**
