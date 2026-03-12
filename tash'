@@ -1,0 +1,234 @@
+warning: in the working copy of 'src/storage.ts', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/src/storage.ts b/src/storage.ts[m
+[1mindex 3369f88c..be542d5f 100644[m
+[1m--- a/src/storage.ts[m
+[1m+++ b/src/storage.ts[m
+[36m@@ -91,7 +91,8 @@[m [mexport interface StorageOptions {[m
+ }[m
+ [m
+ export class RequestAnalyzerStorage {[m
+[31m-  private dataFile: string;[m
+[32m+[m[32m  private legacyDataFile: string;[m
+[32m+[m[32m  private metaFile: string;[m
+   private requests: RequestData[] = [];[m
+   private subagentLinks: SubagentLinkData[] = [];[m
+   private toolCalls: ToolCallData[] = [];[m
+[36m@@ -103,7 +104,8 @@[m [mexport class RequestAnalyzerStorage {[m
+ [m
+   constructor(options: StorageOptions) {[m
+     this.options = options;[m
+[31m-    this.dataFile = path.join(options.workspaceDir, 'requests.json');[m
+[32m+[m[32m    this.legacyDataFile = path.join(options.workspaceDir, 'requests.json');[m
+[32m+[m[32m    this.metaFile = path.join(options.workspaceDir, 'storage-meta.json');[m
+   }[m
+ [m
+   async initialize(): Promise<void> {[m
+[36m@@ -116,19 +118,54 @@[m [mexport class RequestAnalyzerStorage {[m
+         fs.mkdirSync(dir, { recursive: true });[m
+       }[m
+ [m
+[31m-      // Load existing data[m
+[31m-      if (fs.existsSync(this.dataFile)) {[m
+[31m-        const content = fs.readFileSync(this.dataFile, 'utf-8');[m
+[32m+[m[32m      if (fs.existsSync(this.metaFile)) {[m
+[32m+[m[32m        const metaContent = fs.readFileSync(this.metaFile, 'utf-8');[m
+[32m+[m[32m        const meta = JSON.parse(metaContent);[m
+[32m+[m[32m        this.nextId = meta.nextId || 1;[m
+[32m+[m[32m        this.nextLinkId = meta.nextLinkId || 1;[m
+[32m+[m[32m        this.nextToolCallId = meta.nextToolCallId || 1;[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      if (fs.existsSync(this.legacyDataFile)) {[m
+[32m+[m[32m        const content = fs.readFileSync(this.legacyDataFile, 'utf-8');[m
+[32m+[m[32m        const data = JSON.parse(content);[m
+[32m+[m[32m        this.requests.push(...(data.requests || []));[m
+[32m+[m[32m        this.subagentLinks.push(...(data.subagentLinks || []));[m
+[32m+[m[32m        this.toolCalls.push(...(data.toolCalls || []));[m
+[32m+[m[32m        this.nextId = Math.max(this.nextId, data.nextId || 1);[m
+[32m+[m[32m        this.nextLinkId = Math.max(this.nextLinkId, data.nextLinkId || 1);[m
+[32m+[m[32m        this.nextToolCallId = Math.max(this.nextToolCallId, data.nextToolCallId || 1);[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      const datedFiles = this.getDatedDataFiles();[m
+[32m+[m[32m      for (const filePath of datedFiles) {[m
+[32m+[m[32m        const content = fs.readFileSync(filePath, 'utf-8');[m
+         const data = JSON.parse(content);[m
+[31m-        this.requests = data.requests || [];[m
+[31m-        this.subagentLinks = data.subagentLinks || [];[m
+[31m-        this.toolCalls = data.toolCalls || [];[m
+[31m-        this.nextId = data.nextId || (this.requests.length > 0 ? Math.max(...this.requests.map(r => r.id || 0)) + 1 : 1);[m
+[31m-        this.nextLinkId = data.nextLinkId || (this.subagentLinks.length > 0 ? Math.max(...this.subagentLinks.map(r => r.id || 0)) + 1 : 1);[m
+[31m-        this.nextToolCallId = data.nextToolCallId || (this.toolCalls.length > 0 ? Math.max(...this.toolCalls.map(r => r.id || 0)) + 1 : 1);[m
+[32m+[m[32m        this.requests.push(...(data.requests || []));[m
+[32m+[m[32m        this.subagentLinks.push(...(data.subagentLinks || []));[m
+[32m+[m[32m        this.toolCalls.push(...(data.toolCalls || []));[m
+       }[m
+ [m
+[32m+[m[32m      this.requests = this.sortByTimestampDesc(this.requests);[m
+[32m+[m[32m      this.subagentLinks = this.sortByTimestampDesc(this.subagentLinks);[m
+[32m+[m[32m      this.toolCalls = this.sortByTimestampDesc(this.toolCalls);[m
+[32m+[m[32m      this.requests = this.deduplicateById(this.requests);[m
+[32m+[m[32m      this.subagentLinks = this.deduplicateById(this.subagentLinks);[m
+[32m+[m[32m      this.toolCalls = this.deduplicateById(this.toolCalls);[m
+[32m+[m
+[32m+[m[32m      this.nextId = Math.max(this.nextId, this.getNextIdFromItems(this.requests));[m
+[32m+[m[32m      this.nextLinkId = Math.max(this.nextLinkId, this.getNextIdFromItems(this.subagentLinks));[m
+[32m+[m[32m      this.nextToolCallId = Math.max(this.nextToolCallId, this.getNextIdFromItems(this.toolCalls));[m
+[32m+[m
+[32m+[m[32m      const hadLegacyFile = fs.existsSync(this.legacyDataFile);[m
+[32m+[m
+       this.initialized = true;[m
+[32m+[m
+[32m+[m[32m      if (hadLegacyFile) {[m
+[32m+[m[32m        await this.persist();[m
+[32m+[m[32m        fs.unlinkSync(this.legacyDataFile);[m
+[32m+[m[32m      }[m
+[32m+[m
+       this.options.logger.info('ContextScope storage initialized');[m
+     } catch (error) {[m
+       this.options.logger.error(`Failed to initialize storage: ${error}`);[m
+[36m@@ -140,16 +177,64 @@[m [mexport class RequestAnalyzerStorage {[m
+     if (!this.initialized) return;[m
+ [m
+     try {[m
+[31m-      const data = {[m
+[31m-        requests: this.requests,[m
+[31m-        subagentLinks: this.subagentLinks,[m
+[31m-        toolCalls: this.toolCalls,[m
+[32m+[m[32m      const grouped = new Map<string, {[m
+[32m+[m[32m        requests: RequestData[];[m
+[32m+[m[32m        subagentLinks: SubagentLinkData[];[m
+[32m+[m[32m        toolCalls: ToolCallData[];[m
+[32m+[m[32m      }>();[m
+[32m+[m
+[32m+[m[32m      for (const request of this.requests) {[m
+[32m+[m[32m        const key = this.getDateKey(request.timestamp);[m
+[32m+[m[32m        if (!grouped.has(key)) {[m
+[32m+[m[32m          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });[m
+[32m+[m[32m        }[m
+[32m+[m[32m        grouped.get(key)!.requests.push(request);[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      for (const link of this.subagentLinks) {[m
+[32m+[m[32m        const key = this.getDateKey(link.timestamp);[m
+[32m+[m[32m        if (!grouped.has(key)) {[m
+[32m+[m[32m          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });[m
+[32m+[m[32m        }[m
+[32m+[m[32m        grouped.get(key)!.subagentLinks.push(link);[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      for (const toolCall of this.toolCalls) {[m
+[32m+[m[32m        const key = this.getDateKey(toolCall.timestamp);[m
+[32m+[m[32m        if (!grouped.has(key)) {[m
+[32m+[m[32m          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });[m
+[32m+[m[32m        }[m
+[32m+[m[32m        grouped.get(key)!.toolCalls.push(toolCall);[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      const activeFiles = new Set<string>();[m
+[32m+[m[32m      for (const [dateKey, data] of grouped) {[m
+[32m+[m[32m        const filePath = this.getDataFilePath(dateKey);[m
+[32m+[m[32m        activeFiles.add(path.basename(filePath));[m
+[32m+[m[32m        const payload = {[m
+[32m+[m[32m          date: dateKey,[m
+[32m+[m[32m          requests: this.sortByTimestampDesc(data.requests),[m
+[32m+[m[32m          subagentLinks: this.sortByTimestampDesc(data.subagentLinks),[m
+[32m+[m[32m          toolCalls: this.sortByTimestampDesc(data.toolCalls),[m
+[32m+[m[32m          lastUpdated: Date.now()[m
+[32m+[m[32m        };[m
+[32m+[m[32m        fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      for (const oldFilePath of this.getDatedDataFiles()) {[m
+[32m+[m[32m        const fileName = path.basename(oldFilePath);[m
+[32m+[m[32m        if (!activeFiles.has(fileName)) {[m
+[32m+[m[32m          fs.unlinkSync(oldFilePath);[m
+[32m+[m[32m        }[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      const meta = {[m
+         nextId: this.nextId,[m
+         nextLinkId: this.nextLinkId,[m
+         nextToolCallId: this.nextToolCallId,[m
+         lastUpdated: Date.now()[m
+       };[m
+[31m-      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8');[m
+[32m+[m[32m      fs.writeFileSync(this.metaFile, JSON.stringify(meta, null, 2), 'utf-8');[m
+     } catch (error) {[m
+       this.options.logger.error(`Failed to persist data: ${error}`);[m
+     }[m
+[36m@@ -380,9 +465,16 @@[m [mexport class RequestAnalyzerStorage {[m
+ [m
+   private getDatabaseSize(): string {[m
+     try {[m
+[31m-      if (!fs.existsSync(this.dataFile)) return '0 B';[m
+[31m-      const stats = fs.statSync(this.dataFile);[m
+[31m-      const bytes = stats.size;[m
+[32m+[m[32m      let bytes = 0;[m
+[32m+[m[32m      if (fs.existsSync(this.metaFile)) {[m
+[32m+[m[32m        bytes += fs.statSync(this.metaFile).size;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (fs.existsSync(this.legacyDataFile)) {[m
+[32m+[m[32m        bytes += fs.statSync(this.legacyDataFile).size;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      for (const filePath of this.getDatedDataFiles()) {[m
+[32m+[m[32m        bytes += fs.statSync(filePath).size;[m
+[32m+[m[32m      }[m
+       [m
+       if (bytes < 1024) return `${bytes} B`;[m
+       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;[m
+[36m@@ -416,4 +508,54 @@[m [mexport class RequestAnalyzerStorage {[m
+     await this.persist();[m
+     this.initialized = false;[m
+   }[m
+[32m+[m
+[32m+[m[32m  private getDateKey(timestamp: number): string {[m
+[32m+[m[32m    const d = new Date(timestamp);[m
+[32m+[m[32m    const year = d.getFullYear();[m
+[32m+[m[32m    const month = String(d.getMonth() + 1).padStart(2, '0');[m
+[32m+[m[32m    const day = String(d.getDate()).padStart(2, '0');[m
+[32m+[m[32m    return `${year}-${month}-${day}`;[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  private getDataFilePath(dateKey: string): string {[m
+[32m+[m[32m    return path.join(this.options.workspaceDir, `requests-${dateKey}.json`);[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  private getDatedDataFiles(): string[] {[m
+[32m+[m[32m    if (!fs.existsSync(this.options.workspaceDir)) {[m
+[32m+[m[32m      return [];[m
+[32m+[m[32m    }[m
+[32m+[m[32m    const files = fs.readdirSync(this.options.workspaceDir)[m
+[32m+[m[32m      .filter(file => /^requests-\d{4}-\d{2}-\d{2}\.json$/.test(file))[m
+[32m+[m[32m      .map(file => path.join(this.options.workspaceDir, file));[m
+[32m+[m[32m    return files;[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  private sortByTimestampDesc<T extends { timestamp: number; id?: number }>(items: T[]): T[] {[m
+[32m+[m[32m    return [...items].sort((a, b) => {[m
+[32m+[m[32m      if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;[m
+[32m+[m[32m      return (b.id || 0) - (a.id || 0);[m
+[32m+[m[32m    });[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  private getNextIdFromItems<T extends { id?: number }>(items: T[]): number {[m
+[32m+[m[32m    if (items.length === 0) {[m
+[32m+[m[32m      return 1;[m
+[32m+[m[32m    }[m
+[32m+[m[32m    return Math.max(...items.map(item => item.id || 0)) + 1;[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  private deduplicateById<T extends { id?: number; timestamp: number }>(items: T[]): T[] {[m
+[32m+[m[32m    const seen = new Set<number>();[m
+[32m+[m[32m    const deduped: T[] = [];[m
+[32m+[m[32m    for (const item of items) {[m
+[32m+[m[32m      const key = item.id || 0;[m
+[32m+[m[32m      if (key > 0) {[m
+[32m+[m[32m        if (seen.has(key)) continue;[m
+[32m+[m[32m        seen.add(key);[m
+[32m+[m[32m      }[m
+[32m+[m[32m      deduped.push(item);[m
+[32m+[m[32m    }[m
+[32m+[m[32m    return deduped;[m
+[32m+[m[32m  }[m
+ }[m

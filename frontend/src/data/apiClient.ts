@@ -44,9 +44,22 @@ export interface ChainResponse {
   }
 }
 
-export async function fetchRequests(): Promise<RawStore | null> {
+export interface DateFilter {
+  date?: string
+  startDate?: string
+  endDate?: string
+}
+
+export async function fetchRequests(filter?: DateFilter): Promise<RawStore | null> {
   try {
-    const res = await fetch(`${API_BASE}/requests`)
+    const params = new URLSearchParams()
+    if (filter?.date) params.append('date', filter.date)
+    if (filter?.startDate) params.append('startDate', filter.startDate)
+    if (filter?.endDate) params.append('endDate', filter.endDate)
+
+    const queryString = params.toString() ? `?${params.toString()}` : ''
+    
+    const res = await fetch(`${API_BASE}/requests${queryString}`)
     if (!res.ok) {
       console.error('API request failed:', res.status)
       return null
@@ -57,7 +70,7 @@ export async function fetchRequests(): Promise<RawStore | null> {
     let toolCalls: ToolCallData[] = []
     
     try {
-      const linksRes = await fetch(`${API_BASE}/links`)
+      const linksRes = await fetch(`${API_BASE}/links${queryString}`)
       if (linksRes.ok) {
         const linksData = await linksRes.json()
         subagentLinks = linksData.links || linksData.subagentLinks || []
@@ -67,7 +80,7 @@ export async function fetchRequests(): Promise<RawStore | null> {
     }
     
     try {
-      const toolsRes = await fetch(`${API_BASE}/tool-calls`)
+      const toolsRes = await fetch(`${API_BASE}/tool-calls${queryString}`)
       if (toolsRes.ok) {
         const toolsData = await toolsRes.json()
         toolCalls = toolsData.toolCalls || []

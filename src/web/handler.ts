@@ -58,7 +58,7 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
       // API 端点
       if (path === '/plugins/contextscope/api/stats') {
-        return await handleStats(req, res);
+        return await handleStats(req, res, url);
       }
       
       if (path === '/plugins/contextscope/api/requests') {
@@ -95,6 +95,10 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
       if (path === '/plugins/contextscope/api/context') {
         return await handleContext(req, res, url);
+      }
+
+      if (path === '/plugins/contextscope/api/cache') {
+        return await handleCache(req, res, url);
       }
 
       // Dashboard 主页面
@@ -179,7 +183,7 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     }
   }
 
-  async function handleStats(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  async function handleStats(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
     if (req.method !== 'GET') {
       res.statusCode = 405;
       res.end('Method Not Allowed');
@@ -187,7 +191,8 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     }
 
     try {
-      const stats = await service.getStats();
+      const timeFilters = parseTimeFilters(url.searchParams);
+      const stats = await service.getStats(timeFilters);
       const storageStats = await service.getStorageStats();
 
       res.statusCode = 200;
@@ -195,6 +200,7 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       res.end(JSON.stringify({
         stats,
         storage: storageStats,
+        filters: timeFilters,
         config: {
           theme: config.visualization?.theme || 'dark',
           autoRefresh: config.visualization?.autoRefresh !== false,
@@ -220,13 +226,13 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
     try {
       const searchParams = url.searchParams;
+      const timeFilters = parseTimeFilters(searchParams);
       const filters = {
         sessionId: searchParams.get('sessionId') || undefined,
         runId: searchParams.get('runId') || undefined,
         provider: searchParams.get('provider') || undefined,
         model: searchParams.get('model') || undefined,
-        startTime: searchParams.get('startTime') ? parseInt(searchParams.get('startTime')!) : undefined,
-        endTime: searchParams.get('endTime') ? parseInt(searchParams.get('endTime')!) : undefined,
+        ...timeFilters,
         limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
         offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
       };
@@ -300,7 +306,8 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return true;
       }
 
-      const analysis = await service.getSessionAnalysis(sessionId);
+      const timeFilters = parseTimeFilters(url.searchParams);
+      const analysis = await service.getSessionAnalysis(sessionId, timeFilters);
       
       if (!analysis) {
         res.statusCode = 404;
@@ -331,10 +338,12 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
     try {
       const searchParams = url.searchParams;
+      const timeFilters = parseTimeFilters(searchParams);
       const filters = {
         parentRunId: searchParams.get('parentRunId') || undefined,
         childRunId: searchParams.get('childRunId') || undefined,
         parentSessionId: searchParams.get('parentSessionId') || undefined,
+        ...timeFilters,
         limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
         offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
       };
@@ -363,12 +372,12 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
     try {
       const searchParams = url.searchParams;
+      const timeFilters = parseTimeFilters(searchParams);
       const filters = {
         runId: searchParams.get('runId') || undefined,
         sessionId: searchParams.get('sessionId') || undefined,
         toolName: searchParams.get('toolName') || undefined,
-        startTime: searchParams.get('startTime') ? parseInt(searchParams.get('startTime')!) : undefined,
-        endTime: searchParams.get('endTime') ? parseInt(searchParams.get('endTime')!) : undefined,
+        ...timeFilters,
         limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
         offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
       };
@@ -398,9 +407,9 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     try {
       const searchParams = url.searchParams;
       const format = searchParams.get('format') || 'json';
+      const timeFilters = parseTimeFilters(searchParams);
       const filters = {
-        startTime: searchParams.get('startTime') ? parseInt(searchParams.get('startTime')!) : undefined,
-        endTime: searchParams.get('endTime') ? parseInt(searchParams.get('endTime')!) : undefined,
+        ...timeFilters,
         provider: searchParams.get('provider') || undefined,
         model: searchParams.get('model') || undefined
       };
@@ -425,6 +434,48 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to export requests' }));
+      return true;
+    }
+  }
+
+  async function handleCache(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'DELETE' && req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const all = url.searchParams.get('all') === 'true';
+      const date = url.searchParams.get('date') || undefined;
+
+      if (all) {
+        const result = await service.clearAllCache();
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ mode: 'all', ...result }));
+        return true;
+      }
+
+      if (!date) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'date parameter is required when all is not true' }));
+        return true;
+      }
+
+      const result = await service.clearCacheByDate(date);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ mode: 'date', ...result }));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to clear cache: ${error}`);
+      const message = error instanceof Error ? error.message : 'Failed to clear cache';
+      const isBadRequest = message.includes('Invalid date format');
+      res.statusCode = isBadRequest ? 400 : 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: message }));
       return true;
     }
   }
@@ -588,6 +639,57 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       new Date(req.timestamp).toISOString(), req.usage?.input || '', req.usage?.output || '', req.usage?.total || ''
     ]);
     return [headers, ...rows].map(row => row.join(',')).join('\n');
+  }
+
+  function parseTimeFilters(searchParams: URLSearchParams): { startTime?: number; endTime?: number } {
+    const rawStartTime = searchParams.get('startTime');
+    const rawEndTime = searchParams.get('endTime');
+    const rawDate = searchParams.get('date');
+    const rawStartDate = searchParams.get('startDate');
+    const rawEndDate = searchParams.get('endDate');
+
+    let startTime = rawStartTime ? parseInteger(rawStartTime, 'startTime') : undefined;
+    let endTime = rawEndTime ? parseInteger(rawEndTime, 'endTime') : undefined;
+
+    if (startTime === undefined && endTime === undefined && rawDate) {
+      startTime = toDayStart(rawDate);
+      endTime = toDayEnd(rawDate);
+    }
+
+    if (rawStartDate) {
+      startTime = toDayStart(rawStartDate);
+    }
+    if (rawEndDate) {
+      endTime = toDayEnd(rawEndDate);
+    }
+
+    if (startTime !== undefined && endTime !== undefined && startTime > endTime) {
+      throw new Error('Invalid time range: startTime must be less than or equal to endTime');
+    }
+
+    return { startTime, endTime };
+  }
+
+  function parseInteger(value: string, field: string): number {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`Invalid ${field}, expected integer timestamp`);
+    }
+    return parsed;
+  }
+
+  function toDayStart(date: string): number {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error('Invalid date format, expected YYYY-MM-DD');
+    }
+    return new Date(`${date}T00:00:00.000`).getTime();
+  }
+
+  function toDayEnd(date: string): number {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error('Invalid date format, expected YYYY-MM-DD');
+    }
+    return new Date(`${date}T23:59:59.999`).getTime();
   }
 
   function generateDashboardHTML(config: PluginConfig): string {

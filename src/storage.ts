@@ -91,7 +91,8 @@ export interface StorageOptions {
 }
 
 export class RequestAnalyzerStorage {
-  private dataFile: string;
+  private legacyDataFile: string;
+  private metaFile: string;
   private requests: RequestData[] = [];
   private subagentLinks: SubagentLinkData[] = [];
   private toolCalls: ToolCallData[] = [];
@@ -103,7 +104,8 @@ export class RequestAnalyzerStorage {
 
   constructor(options: StorageOptions) {
     this.options = options;
-    this.dataFile = path.join(options.workspaceDir, 'requests.json');
+    this.legacyDataFile = path.join(options.workspaceDir, 'requests.json');
+    this.metaFile = path.join(options.workspaceDir, 'storage-meta.json');
   }
 
   async initialize(): Promise<void> {
@@ -116,19 +118,54 @@ export class RequestAnalyzerStorage {
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      // Load existing data
-      if (fs.existsSync(this.dataFile)) {
-        const content = fs.readFileSync(this.dataFile, 'utf-8');
-        const data = JSON.parse(content);
-        this.requests = data.requests || [];
-        this.subagentLinks = data.subagentLinks || [];
-        this.toolCalls = data.toolCalls || [];
-        this.nextId = data.nextId || (this.requests.length > 0 ? Math.max(...this.requests.map(r => r.id || 0)) + 1 : 1);
-        this.nextLinkId = data.nextLinkId || (this.subagentLinks.length > 0 ? Math.max(...this.subagentLinks.map(r => r.id || 0)) + 1 : 1);
-        this.nextToolCallId = data.nextToolCallId || (this.toolCalls.length > 0 ? Math.max(...this.toolCalls.map(r => r.id || 0)) + 1 : 1);
+      if (fs.existsSync(this.metaFile)) {
+        const metaContent = fs.readFileSync(this.metaFile, 'utf-8');
+        const meta = JSON.parse(metaContent);
+        this.nextId = meta.nextId || 1;
+        this.nextLinkId = meta.nextLinkId || 1;
+        this.nextToolCallId = meta.nextToolCallId || 1;
       }
 
+      if (fs.existsSync(this.legacyDataFile)) {
+        const content = fs.readFileSync(this.legacyDataFile, 'utf-8');
+        const data = JSON.parse(content);
+        this.requests.push(...(data.requests || []));
+        this.subagentLinks.push(...(data.subagentLinks || []));
+        this.toolCalls.push(...(data.toolCalls || []));
+        this.nextId = Math.max(this.nextId, data.nextId || 1);
+        this.nextLinkId = Math.max(this.nextLinkId, data.nextLinkId || 1);
+        this.nextToolCallId = Math.max(this.nextToolCallId, data.nextToolCallId || 1);
+      }
+
+      const datedFiles = this.getDatedDataFiles();
+      for (const filePath of datedFiles) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const data = JSON.parse(content);
+        this.requests.push(...(data.requests || []));
+        this.subagentLinks.push(...(data.subagentLinks || []));
+        this.toolCalls.push(...(data.toolCalls || []));
+      }
+
+      this.requests = this.sortByTimestampDesc(this.requests);
+      this.subagentLinks = this.sortByTimestampDesc(this.subagentLinks);
+      this.toolCalls = this.sortByTimestampDesc(this.toolCalls);
+      this.requests = this.deduplicateById(this.requests);
+      this.subagentLinks = this.deduplicateById(this.subagentLinks);
+      this.toolCalls = this.deduplicateById(this.toolCalls);
+
+      this.nextId = Math.max(this.nextId, this.getNextIdFromItems(this.requests));
+      this.nextLinkId = Math.max(this.nextLinkId, this.getNextIdFromItems(this.subagentLinks));
+      this.nextToolCallId = Math.max(this.nextToolCallId, this.getNextIdFromItems(this.toolCalls));
+
+      const hadLegacyFile = fs.existsSync(this.legacyDataFile);
+
       this.initialized = true;
+
+      if (hadLegacyFile) {
+        await this.persist();
+        fs.unlinkSync(this.legacyDataFile);
+      }
+
       this.options.logger.info('ContextScope storage initialized');
     } catch (error) {
       this.options.logger.error(`Failed to initialize storage: ${error}`);
@@ -140,16 +177,64 @@ export class RequestAnalyzerStorage {
     if (!this.initialized) return;
 
     try {
-      const data = {
-        requests: this.requests,
-        subagentLinks: this.subagentLinks,
-        toolCalls: this.toolCalls,
+      const grouped = new Map<string, {
+        requests: RequestData[];
+        subagentLinks: SubagentLinkData[];
+        toolCalls: ToolCallData[];
+      }>();
+
+      for (const request of this.requests) {
+        const key = this.getDateKey(request.timestamp);
+        if (!grouped.has(key)) {
+          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+        }
+        grouped.get(key)!.requests.push(request);
+      }
+
+      for (const link of this.subagentLinks) {
+        const key = this.getDateKey(link.timestamp);
+        if (!grouped.has(key)) {
+          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+        }
+        grouped.get(key)!.subagentLinks.push(link);
+      }
+
+      for (const toolCall of this.toolCalls) {
+        const key = this.getDateKey(toolCall.timestamp);
+        if (!grouped.has(key)) {
+          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+        }
+        grouped.get(key)!.toolCalls.push(toolCall);
+      }
+
+      const activeFiles = new Set<string>();
+      for (const [dateKey, data] of grouped) {
+        const filePath = this.getDataFilePath(dateKey);
+        activeFiles.add(path.basename(filePath));
+        const payload = {
+          date: dateKey,
+          requests: this.sortByTimestampDesc(data.requests),
+          subagentLinks: this.sortByTimestampDesc(data.subagentLinks),
+          toolCalls: this.sortByTimestampDesc(data.toolCalls),
+          lastUpdated: Date.now()
+        };
+        fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+      }
+
+      for (const oldFilePath of this.getDatedDataFiles()) {
+        const fileName = path.basename(oldFilePath);
+        if (!activeFiles.has(fileName)) {
+          fs.unlinkSync(oldFilePath);
+        }
+      }
+
+      const meta = {
         nextId: this.nextId,
         nextLinkId: this.nextLinkId,
         nextToolCallId: this.nextToolCallId,
         lastUpdated: Date.now()
       };
-      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8');
+      fs.writeFileSync(this.metaFile, JSON.stringify(meta, null, 2), 'utf-8');
     } catch (error) {
       this.options.logger.error(`Failed to persist data: ${error}`);
     }
@@ -329,6 +414,8 @@ export class RequestAnalyzerStorage {
     parentRunId?: string;
     childRunId?: string;
     parentSessionId?: string;
+    startTime?: number;
+    endTime?: number;
     limit?: number;
     offset?: number;
   } = {}): Promise<SubagentLinkData[]> {
@@ -344,6 +431,12 @@ export class RequestAnalyzerStorage {
     }
     if (filters.parentSessionId) {
       filtered = filtered.filter(r => r.parentSessionId === filters.parentSessionId);
+    }
+    if (filters.startTime) {
+      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
+    }
+    if (filters.endTime) {
+      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
     }
 
     const offset = filters.offset || 0;
@@ -380,9 +473,16 @@ export class RequestAnalyzerStorage {
 
   private getDatabaseSize(): string {
     try {
-      if (!fs.existsSync(this.dataFile)) return '0 B';
-      const stats = fs.statSync(this.dataFile);
-      const bytes = stats.size;
+      let bytes = 0;
+      if (fs.existsSync(this.metaFile)) {
+        bytes += fs.statSync(this.metaFile).size;
+      }
+      if (fs.existsSync(this.legacyDataFile)) {
+        bytes += fs.statSync(this.legacyDataFile).size;
+      }
+      for (const filePath of this.getDatedDataFiles()) {
+        bytes += fs.statSync(filePath).size;
+      }
       
       if (bytes < 1024) return `${bytes} B`;
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -415,5 +515,100 @@ export class RequestAnalyzerStorage {
   async close(): Promise<void> {
     await this.persist();
     this.initialized = false;
+  }
+
+  async clearByDate(dateKey: string): Promise<{ date: string; removedRequests: number; removedSubagentLinks: number; removedToolCalls: number }> {
+    if (!this.initialized) await this.initialize();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+      throw new Error('Invalid date format, expected YYYY-MM-DD');
+    }
+
+    const beforeRequests = this.requests.length;
+    const beforeLinks = this.subagentLinks.length;
+    const beforeToolCalls = this.toolCalls.length;
+
+    this.requests = this.requests.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+    this.subagentLinks = this.subagentLinks.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+    this.toolCalls = this.toolCalls.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+
+    await this.persist();
+
+    return {
+      date: dateKey,
+      removedRequests: beforeRequests - this.requests.length,
+      removedSubagentLinks: beforeLinks - this.subagentLinks.length,
+      removedToolCalls: beforeToolCalls - this.toolCalls.length
+    };
+  }
+
+  async clearAll(): Promise<{ removedRequests: number; removedSubagentLinks: number; removedToolCalls: number }> {
+    if (!this.initialized) await this.initialize();
+
+    const removedRequests = this.requests.length;
+    const removedSubagentLinks = this.subagentLinks.length;
+    const removedToolCalls = this.toolCalls.length;
+
+    this.requests = [];
+    this.subagentLinks = [];
+    this.toolCalls = [];
+
+    await this.persist();
+
+    return {
+      removedRequests,
+      removedSubagentLinks,
+      removedToolCalls
+    };
+  }
+
+  private getDateKey(timestamp: number): string {
+    const d = new Date(timestamp);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private getDataFilePath(dateKey: string): string {
+    return path.join(this.options.workspaceDir, `requests-${dateKey}.json`);
+  }
+
+  private getDatedDataFiles(): string[] {
+    if (!fs.existsSync(this.options.workspaceDir)) {
+      return [];
+    }
+    const files = fs.readdirSync(this.options.workspaceDir)
+      .filter(file => /^requests-\d{4}-\d{2}-\d{2}\.json$/.test(file))
+      .map(file => path.join(this.options.workspaceDir, file));
+    return files;
+  }
+
+  private sortByTimestampDesc<T extends { timestamp: number; id?: number }>(items: T[]): T[] {
+    return [...items].sort((a, b) => {
+      if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
+      return (b.id || 0) - (a.id || 0);
+    });
+  }
+
+  private getNextIdFromItems<T extends { id?: number }>(items: T[]): number {
+    if (items.length === 0) {
+      return 1;
+    }
+    return Math.max(...items.map(item => item.id || 0)) + 1;
+  }
+
+  private deduplicateById<T extends { id?: number; timestamp: number }>(items: T[]): T[] {
+    const seen = new Set<number>();
+    const deduped: T[] = [];
+    for (const item of items) {
+      const key = item.id || 0;
+      if (key > 0) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      deduped.push(item);
+    }
+    return deduped;
   }
 }

@@ -317,6 +317,8 @@ export class RequestAnalyzerService {
     parentRunId?: string;
     childRunId?: string;
     parentSessionId?: string;
+    startTime?: number;
+    endTime?: number;
     limit?: number;
     offset?: number;
   } = {}): Promise<SubagentLinkData[]> {
@@ -337,6 +339,23 @@ export class RequestAnalyzerService {
 
   async getStorageStats(): Promise<any> {
     return await this.storage.getStats();
+  }
+
+  async clearCacheByDate(date: string): Promise<{
+    date: string;
+    removedRequests: number;
+    removedSubagentLinks: number;
+    removedToolCalls: number;
+  }> {
+    return await this.storage.clearByDate(date);
+  }
+
+  async clearAllCache(): Promise<{
+    removedRequests: number;
+    removedSubagentLinks: number;
+    removedToolCalls: number;
+  }> {
+    return await this.storage.clearAll();
   }
 
   async getDetailedAnalysis(runId: string): Promise<DetailedAnalysis | null> {
@@ -455,7 +474,7 @@ export class RequestAnalyzerService {
     }
   }
 
-  async getSessionAnalysis(sessionId: string): Promise<{
+  async getSessionAnalysis(sessionId: string, filters: { startTime?: number; endTime?: number } = {}): Promise<{
     totalTokens: number;
     totalRequests: number;
     averageTokensPerRequest: number;
@@ -463,7 +482,7 @@ export class RequestAnalyzerService {
     tokenTrend: Array<{ timestamp: number; tokens: number }>;
   } | null> {
     try {
-      const requests = await this.storage.getRequests({ sessionId, limit: 1000 });
+      const requests = await this.storage.getRequests({ sessionId, ...filters, limit: 1000 });
       if (requests.length === 0) return null;
 
       const totalTokens = requests.reduce((sum, r) => sum + (r.usage?.total || 0), 0);

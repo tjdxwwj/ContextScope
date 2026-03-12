@@ -16,8 +16,11 @@ import {
   Maximize2,
   Minimize2,
   MousePointer2,
+  Calendar,
+  Trash2,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
+import { message, Modal } from 'antd'
 import * as d3 from 'd3'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -253,9 +256,15 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
       const selfTotal = node.usage.total
       const subtreeTotal = selfTotal + childrenTotal
       
+      const modelName = node.model ? node.model.split('/').pop() ?? node.model : 'Unknown'
+      const timeText = new Date(node.startTime).toLocaleTimeString('zh-CN', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+
       return {
-        // 使用 runId 前缀作为方块标题，保持与 GitGraph / 左侧列表一致
-        name: node.runId.substring(0, 8),
+        name: `${modelName} · ${timeText}`,
         value: subtreeTotal,
         selfValue: selfTotal,
         input: node.usage.input,
@@ -1200,6 +1209,9 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'overview' | 'run'>('run')
   const [activeTab, setActiveTab] = useState<'details' | 'tree'>('details')
   const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap'>('timeline')
+  const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>({})
+  const [showDatePicker, setShowDatePicker] = useState(false)
+  const [isClearingCache, setIsClearingCache] = useState(false)
 
   const handleLocate = useCallback((runId: string) => {
     logRunListDebug('locate-run-requested', {
@@ -1233,7 +1245,7 @@ export default function App() {
   const loadData = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
-    const raw = await loadLocalStore()
+    const raw = await loadLocalStore(dateFilter)
     if (!raw) {
       setLoadError(
         '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
@@ -1247,10 +1259,25 @@ export default function App() {
           firstRunId: tree[0]?.runId ?? null,
         })
       setRoots(tree)
-      setSelectedRun(tree.length > 0 ? tree[0] : null)
+      
+      // Try to preserve selection
+      if (selectedRunRef.current) {
+        const found = findRunInTree(tree, selectedRunRef.current.runId)
+        if (found) {
+          setSelectedRun(found)
+        } else if (tree.length > 0) {
+          setSelectedRun(tree[0])
+        } else {
+          setSelectedRun(null)
+        }
+      } else if (tree.length > 0) {
+        setSelectedRun(tree[0])
+      } else {
+        setSelectedRun(null)
+      }
     }
     setLoading(false)
-  }, [])
+  }, [dateFilter])
 
   useEffect(() => {
     logRunListDebug('polling-effect-mounted', {})
@@ -1258,38 +1285,79 @@ export default function App() {
     
     // 实时数据轮询 - 每 5 秒从真实 API 获取最新数据
     const pollInterval = setInterval(async () => {
-      const realTimeData = await loadRealTimeData()
-      if (realTimeData && realTimeData.requests.length > 0) {
-        console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
-        const tree = buildRunTree(realTimeData)
-        setRoots(tree)
-        // 保持当前选中的 run（如果还存在）
-        const currentSelectedRun = selectedRunRef.current
-        if (currentSelectedRun) {
-          const stillExists = findRunInTree(tree, currentSelectedRun.runId)
-          if (stillExists) {
-            logRunListDebug('poll-keep-selected-run', {
-              selectedRunId: currentSelectedRun.runId,
-            })
-            setSelectedRun(stillExists)
-          } else if (tree.length > 0) {
-            logRunListDebug('poll-selected-run-missing-fallback-first', {
-              previousSelectedRunId: currentSelectedRun.runId,
-              fallbackRunId: tree[0].runId,
-            })
-            setSelectedRun(tree[0])
+      // 只有在没有日期过滤且在概览模式下才自动刷新，或者根据需求调整
+      if (Object.keys(dateFilter).length === 0) {
+        const realTimeData = await loadRealTimeData()
+        if (realTimeData && realTimeData.requests.length > 0) {
+          console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
+          const tree = buildRunTree(realTimeData)
+          setRoots(tree)
+          // 保持当前选中的 run（如果还存在）
+          const currentSelectedRun = selectedRunRef.current
+          if (currentSelectedRun) {
+            const stillExists = findRunInTree(tree, currentSelectedRun.runId)
+            if (stillExists) {
+              setSelectedRun(stillExists)
+            }
           }
-        } else if (tree.length > 0) {
-          logRunListDebug('poll-no-selected-run-fallback-first', {
-            fallbackRunId: tree[0].runId,
-          })
-          setSelectedRun(tree[0])
         }
       }
     }, 5000) // 5 秒轮询一次
     
     return () => clearInterval(pollInterval)
-  }, [loadData])
+  }, [loadData, dateFilter])
+
+  const handleClearCache = async (all: boolean = false) => {
+    if (!all && !dateFilter.date) {
+      if (dateFilter.startDate || dateFilter.endDate) {
+        message.warning('暂不支持清除日期范围，请先选择单个日期进行清除')
+      } else {
+        message.warning('请先选择要清除的日期')
+      }
+      return
+    }
+
+    Modal.confirm({
+      title: '确认清除缓存',
+      content: all ? '确定要清除所有缓存吗？此操作不可恢复。' : `确定要清除 ${dateFilter.date} 的缓存吗？此操作不可恢复。`,
+      okText: '确定',
+      cancelText: '取消',
+      okType: 'danger',
+      onOk: async () => {
+        setIsClearingCache(true)
+        try {
+          const params = new URLSearchParams()
+          if (all) {
+            params.append('all', 'true')
+          } else if (dateFilter.date) {
+            params.append('date', dateFilter.date)
+          } else {
+            message.warning('请先选择具体日期再清除缓存')
+            setIsClearingCache(false)
+            return
+          }
+    
+          const res = await fetch(`/plugins/contextscope/api/cache?${params.toString()}`, {
+            method: 'DELETE'
+          })
+          
+          if (res.ok) {
+            message.success('缓存清除成功')
+            await loadData() // Reload data
+            setShowDatePicker(false) // 关闭日期选择器
+          } else {
+            const err = await res.json()
+            message.error(`清除失败: ${err.error}`)
+          }
+        } catch (e) {
+          console.error('Failed to clear cache:', e)
+          message.error('清除失败')
+        } finally {
+          setIsClearingCache(false)
+        }
+      }
+    })
+  }
 
   useEffect(() => {
     logRunListDebug('selected-run-changed', {
@@ -1317,6 +1385,118 @@ export default function App() {
           </span>
         </div>
         <div className="flex items-center gap-4">
+          <div className="relative text-slate-600">
+            <button
+              onClick={() => setShowDatePicker(!showDatePicker)}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors",
+                dateFilter.date || dateFilter.startDate 
+                  ? "bg-blue-50 border-blue-200 text-blue-700" 
+                  : "bg-white/10 border-white/20 text-slate-200 hover:bg-white/20"
+              )}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              {dateFilter.date 
+                ? dateFilter.date 
+                : dateFilter.startDate 
+                  ? `${dateFilter.startDate} - ${dateFilter.endDate || 'Now'}` 
+                  : "所有日期"
+              }
+              <ChevronDown className="w-3 h-3 opacity-50" />
+            </button>
+            
+            {showDatePicker && (
+              <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-4 z-50 text-slate-600">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">单日选择</label>
+                    <input 
+                      type="date" 
+                      className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                      value={dateFilter.date || ''}
+                      onChange={(e) => {
+                        setDateFilter({ date: e.target.value })
+                        setShowDatePicker(false)
+                      }}
+                    />
+                  </div>
+                  
+                  <div className="relative flex py-1 items-center">
+                    <div className="flex-grow border-t border-slate-100"></div>
+                    <span className="flex-shrink-0 mx-2 text-xs text-slate-300">OR</span>
+                    <div className="flex-grow border-t border-slate-100"></div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1">日期范围</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="date" 
+                        className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                        value={dateFilter.startDate || ''}
+                        onChange={(e) => setDateFilter(prev => ({ ...prev, date: undefined, startDate: e.target.value }))}
+                      />
+                      <span className="self-center text-slate-400">-</span>
+                      <input 
+                        type="date" 
+                        className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                        value={dateFilter.endDate || ''}
+                        onChange={(e) => setDateFilter(prev => ({ ...prev, date: undefined, endDate: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex justify-between">
+                    <button
+                      onClick={() => {
+                        setDateFilter({})
+                        setShowDatePicker(false)
+                      }}
+                      className="px-3 py-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                    >
+                      重置
+                    </button>
+                    <button
+                      onClick={() => setShowDatePicker(false)}
+                      className="px-3 py-1.5 text-xs font-medium bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors shadow-sm shadow-blue-500/20"
+                    >
+                      确定
+                    </button>
+                  </div>
+                  
+                  <div className="pt-2 border-t border-slate-100 mt-2">
+                     <p className="text-[10px] font-bold text-slate-400 mb-2">数据管理</p>
+                     <div className="flex gap-2">
+                       <button
+                          onClick={() => handleClearCache(false)}
+                          disabled={isClearingCache}
+                          className={cn(
+                            "flex-1 px-2 py-1.5 text-xs border rounded-lg flex items-center justify-center gap-1",
+                            !dateFilter.date 
+                              ? "border-slate-200 text-slate-400 cursor-not-allowed bg-slate-50"
+                              : "border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer"
+                          )}
+                          title={dateFilter.date ? "清除当前选中日期的缓存" : "请先选择单个日期"}
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          清除当前
+                        </button>
+                       <button
+                         onClick={() => handleClearCache(true)}
+                         disabled={isClearingCache}
+                         className="flex-1 px-2 py-1.5 text-xs bg-rose-50 border border-rose-200 text-rose-700 rounded-lg hover:bg-rose-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                         title="清除所有缓存数据"
+                       >
+                         <Trash2 className="w-3 h-3" />
+                         清除所有
+                       </button>
+                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="flex items-center gap-2 bg-white/5 px-3 py-1.5 rounded-full border border-white/10">
             <div
               className={cn(
