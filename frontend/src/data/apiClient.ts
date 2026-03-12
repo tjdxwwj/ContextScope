@@ -132,6 +132,13 @@ export async function fetchChain(runId: string): Promise<ChainResponse | null> {
 
 export interface ContextResponse {
   runId: string
+  context: {
+    systemPrompt: string
+    userPrompt: string
+    history: any[]
+    toolCalls: any[]
+    subagentLinks: any[]
+  }
   tokenDistribution: {
     total: number
     breakdown: {
@@ -146,6 +153,20 @@ export interface ContextResponse {
       history: number;
       toolResponses: number;
     }
+  }
+  modelInfo: {
+    name: string
+    provider: string
+    contextWindow: number
+    estimatedCost: number
+  }
+  stats: {
+    totalMessages: number
+    totalTokens: number
+    systemPromptPercentage: number
+    historyPercentage: number;
+    userPromptPercentage: number;
+    toolResponsesPercentage: number;
   }
 }
 

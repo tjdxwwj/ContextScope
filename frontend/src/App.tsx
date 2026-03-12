@@ -259,8 +259,12 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
       const childrenTotal = children.reduce((s, c) => s + (c.value ?? 0), 0)
       const selfTotal = node.usage.total
       const subtreeTotal = selfTotal + childrenTotal
+
+      const dateStr = new Date(node.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      const modelShort = node.model ? node.model.split('/').pop() : 'Unknown'
+      
       return {
-        name: node.runId.substring(0, 8),
+        name: `${modelShort} (${dateStr})`,
         value: subtreeTotal,
         selfValue: selfTotal,
         input: node.usage.input,
@@ -333,21 +337,21 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
       .on('click', (_event, d) => {
         if (d.data.id && d.depth >= 0) setDrillRootId(d.data.id)
       })
-      .on('mouseenter', (_event, d) =>
+      .on('mouseenter', (_event, d) => {
         setHovered(
-          d.data.value != null && d.data.input != null && d.data.output != null && d.data.id
+          d.data.value != null
             ? {
                 name: d.data.name,
                 value: d.data.value,
                 selfValue: d.data.selfValue,
-                input: d.data.input,
-                output: d.data.output,
+                input: d.data.input ?? 0,
+                output: d.data.output ?? 0,
                 model: d.data.model,
-                id: d.data.id,
+                id: d.data.id ?? '',
               }
             : null
         )
-      )
+      })
       .on('mouseleave', () => setHovered(null))
 
     const minLabelW = 44
@@ -420,22 +424,61 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 4 }}
-            className="absolute right-4 bottom-4 w-52 bg-slate-800/95 backdrop-blur text-white p-3 rounded-lg shadow-xl border border-white/10 z-50 pointer-events-none text-left"
+            className="absolute right-4 bottom-4 w-64 bg-slate-800/95 backdrop-blur text-white p-4 rounded-xl shadow-2xl border border-white/10 z-50 pointer-events-none text-left"
           >
-            <p className="text-[10px] font-bold uppercase text-emerald-400 mb-0.5">{hovered.model ?? '-'}</p>
-            <p className="mono text-[11px] font-bold truncate mb-2">{hovered.id}</p>
-            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-              <span className="text-slate-400">In</span>
-              <span className="mono font-medium">{hovered.input.toLocaleString()}</span>
-              <span className="text-slate-400">Out</span>
-              <span className="mono font-medium">{hovered.output.toLocaleString()}</span>
+            <div className="flex items-start justify-between mb-2">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-emerald-400 mb-0.5 tracking-wider">
+                  {hovered.model ? hovered.model.split('/').pop() : 'UNKNOWN MODEL'}
+                </p>
+                <p className="text-sm font-bold text-white leading-tight break-words">{hovered.name}</p>
+              </div>
             </div>
-            <div className="mt-2 pt-2 border-t border-white/10 flex justify-between items-center">
-              <span className="text-[10px] text-slate-400">含子 Total</span>
-              <span className="text-xs font-bold text-emerald-400 mono">{hovered.value.toLocaleString()}</span>
+            
+            {hovered.id && !hovered.id.startsWith('tool-') && (
+              <div className="flex items-center gap-2 mb-3">
+                <span className="px-1.5 py-0.5 bg-white/10 rounded text-[9px] font-mono text-slate-300">
+                  {hovered.id}
+                </span>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-400">Total Tokens</span>
+                <span className="font-bold font-mono text-white">{hovered.value.toLocaleString()}</span>
+              </div>
+              
+              <div className="h-1.5 w-full bg-slate-700/50 rounded-full overflow-hidden flex">
+                <div 
+                  className="bg-blue-500 h-full" 
+                  style={{ width: `${(hovered.input / hovered.value) * 100}%` }}
+                />
+                <div 
+                  className="bg-emerald-500 h-full" 
+                  style={{ width: `${(hovered.output / hovered.value) * 100}%` }}
+                />
+              </div>
+              
+              <div className="flex justify-between text-[10px]">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                  <span className="text-slate-400">In</span>
+                  <span className="font-mono text-slate-300">{hovered.input.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  <span className="text-slate-400">Out</span>
+                  <span className="font-mono text-slate-300">{hovered.output.toLocaleString()}</span>
+                </div>
+              </div>
             </div>
-            {hovered.selfValue != null && hovered.selfValue !== hovered.value && (
-              <p className="text-[9px] text-slate-400 mt-1">自身 {hovered.selfValue.toLocaleString()}</p>
+
+            {hovered.selfValue != null && hovered.selfValue < hovered.value && (
+              <div className="mt-3 pt-3 border-t border-white/10 flex justify-between items-center text-[10px]">
+                <span className="text-slate-500">Self (exclude children)</span>
+                <span className="font-mono text-slate-400">{hovered.selfValue.toLocaleString()}</span>
+              </div>
             )}
           </motion.div>
         )}
