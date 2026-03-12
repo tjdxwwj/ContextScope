@@ -178,6 +178,14 @@ export class RequestAnalyzerStorage {
     }
   }
 
+  /**
+   * Get the input request for a specific runId
+   */
+  async getInputForRun(runId: string): Promise<RequestData | undefined> {
+    if (!this.initialized) await this.initialize();
+    return this.requests.find(r => r.runId === runId && r.type === 'input');
+  }
+
   async captureSubagentLink(data: SubagentLinkData): Promise<void> {
     if (!this.initialized) await this.initialize();
 

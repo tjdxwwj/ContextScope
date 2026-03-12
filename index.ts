@@ -27,6 +27,7 @@ import { RequestAnalyzerStorage } from './src/storage.js';
 import { RequestAnalyzerService } from './src/service.js';
 import { createAnalyzerHttpHandler } from './src/web/handler.js';
 import { configSchema } from './src/config.js';
+import { TokenEstimationService } from './src/token-estimator.js';
 
 interface PluginConfig {
   storage?: {
@@ -75,6 +76,9 @@ const plugin = {
       logger: api.logger
     });
 
+    // Token 计算服务
+    const tokenEstimator = new TokenEstimationService({ model: 'gpt-3.5-turbo' });
+
     // Register HTTP route for dashboard
     api.registerHttpRoute({
       path: '/plugins/contextscope',
@@ -88,6 +92,14 @@ const plugin = {
       try {
         const includeSystemPrompts = config.capture?.includeSystemPrompts !== false;
         const includeMessageHistory = config.capture?.includeMessageHistory !== false;
+        
+        // 计算 input token 数
+        const inputTokens = tokenEstimator.countContext({
+          systemPrompt: includeSystemPrompts ? event.systemPrompt : undefined,
+          historyMessages: includeMessageHistory ? event.historyMessages : undefined,
+          prompt: event.prompt
+        });
+        
         await service.captureRequest({
           type: 'input',
           runId: event.runId,
@@ -100,6 +112,11 @@ const plugin = {
           systemPrompt: includeSystemPrompts ? event.systemPrompt : undefined,
           historyMessages: includeMessageHistory ? event.historyMessages : undefined,
           imagesCount: event.imagesCount,
+          usage: {
+            input: inputTokens.input,
+            output: 0,
+            total: inputTokens.total,
+          },
           metadata: {
             agentId: ctx.agentId,
             channelId: ctx.channelId,
@@ -114,15 +131,25 @@ const plugin = {
     api.on('llm_output', async (event, ctx) => {
       try {
         const rawUsage = event.usage;
+        
+        // 从 storage 获取对应的 input request 来计算准确的 input tokens
+        const inputRequest = await storage.getInputForRun(event.runId);
+        const inputTokens = inputRequest?.usage?.input ?? 0;
+        
         const usage = rawUsage
           ? {
-              input: rawUsage.input,
+              input: inputTokens > 0 ? inputTokens : (rawUsage.input ?? 0),
               output: rawUsage.output,
               cacheRead: rawUsage.cacheRead,
               cacheWrite: rawUsage.cacheWrite,
               total: rawUsage.total ?? (rawUsage as { totalTokens?: number }).totalTokens,
             }
-          : undefined;
+          : {
+              input: inputTokens,
+              output: 0,
+              total: inputTokens,
+            };
+        
         await service.captureResponse({
           type: 'output',
           runId: event.runId,

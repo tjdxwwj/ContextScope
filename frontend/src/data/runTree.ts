@@ -44,10 +44,19 @@ function aggregateRunFromRequests(requests: RequestData[]): Omit<RunTreeNode, 'c
   let provider: string | undefined
   for (const r of requests) {
     const u = r.usage
-    if (u?.input != null) input += u.input
-    if (u?.output != null) output += u.output
-    if (u?.total != null) total += u.total
-    else if (u?.totalTokens != null) total += u.totalTokens
+    // 注意：OpenClaw 可能不传递 input tokens，需要从 total 推算
+    let requestInput = u?.input ?? 0
+    let requestOutput = u?.output ?? 0
+    let requestTotal = u?.total ?? u?.totalTokens ?? 0
+    
+    // 如果 input 为 0 但 total 有值，尝试从 total - output 推算 input
+    if (requestInput === 0 && requestTotal > 0 && requestOutput > 0) {
+      requestInput = requestTotal - requestOutput
+    }
+    
+    input += requestInput
+    output += requestOutput
+    if (requestTotal != null) total += requestTotal
     if (r.type === 'output') hasOutput = true
     if ((r as RequestData & { error?: string }).error) hasError = true
     if (r.model) model = r.model
@@ -115,7 +124,7 @@ export function buildRunTree(raw: RawStore): RunTreeNode[] {
   // 按 runId 分组 requests
   const byRunId = new Map<string, RequestData[]>()
   for (const r of requests) {
-    const runId = r.runId.trim()
+    const runId = r.runId?.trim()
     if (!runId) continue
     if (!byRunId.has(runId)) byRunId.set(runId, [])
     byRunId.get(runId)!.push(r)
@@ -132,8 +141,10 @@ export function buildRunTree(raw: RawStore): RunTreeNode[] {
   const parentToChildren = new Map<string, SubagentLinkData[]>()
   const allChildIds = new Set<string>()
   for (const link of spawnLinks) {
-    const parent = link.parentRunId.trim()
-    const child = link.childRunId!.trim()
+    const parent = link.parentRunId?.trim()
+    if (!parent) continue
+    const child = link.childRunId?.trim()
+    if (!child) continue
     allChildIds.add(child)
     if (!parentToChildren.has(parent)) parentToChildren.set(parent, [])
     parentToChildren.get(parent)!.push(link)

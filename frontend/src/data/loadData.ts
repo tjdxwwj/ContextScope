@@ -1,28 +1,22 @@
 /**
- * 从本地静态文件加载 requests.json（不经过服务端接口）。
- * 将 docs/requests.json 复制到 frontend/public/data/requests.json 即可。
+ * 加载数据 - 仅从真实 API 获取
  */
 
 import type { RawStore } from './rawTypes'
-
-const DATA_URL = '/data/requests.json'
+import { fetchRequests } from './apiClient'
 
 export async function loadLocalStore(): Promise<RawStore | null> {
-  try {
-    const res = await fetch(DATA_URL)
-    if (!res.ok) return null
-    const data = (await res.json()) as RawStore
-    if (!data || !Array.isArray(data.requests)) return null
-    return {
-      requests: data.requests || [],
-      subagentLinks: data.subagentLinks || [],
-      toolCalls: data.toolCalls || [],
-      nextId: data.nextId,
-      nextLinkId: data.nextLinkId,
-      nextToolCallId: data.nextToolCallId,
-      lastUpdated: data.lastUpdated,
-    }
-  } catch {
-    return null
+  const apiData = await fetchRequests()
+  if (apiData) {
+    console.log('[Data] Loaded from real API:', apiData.requests.length, 'requests')
+    return apiData
   }
+
+  console.log('[Data] API unavailable, no fallback enabled')
+  return null
+}
+
+// 实时数据轮询（每 5 秒刷新一次）
+export async function loadRealTimeData(): Promise<RawStore | null> {
+  return await fetchRequests()
 }

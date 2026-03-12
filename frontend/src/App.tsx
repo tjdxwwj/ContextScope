@@ -21,7 +21,8 @@ import { motion, AnimatePresence } from 'motion/react'
 import * as d3 from 'd3'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import { loadLocalStore } from './data/loadData'
+import { ContextDistribution } from './components/ContextDistribution'
+import { loadLocalStore, loadRealTimeData } from './data/loadData'
 import { buildRunTree, findRunInTree, type RunTreeNode } from './data/runTree'
 
 function cn(...inputs: ClassValue[]) {
@@ -32,6 +33,9 @@ const formatTime = (ts: number) =>
   new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
 const formatFullTime = (ts: number) =>
   new Date(ts).toLocaleString('zh-CN', { hour12: false })
+const logRunListDebug = (event: string, payload: Record<string, unknown> = {}) => {
+  console.log(`[RunListDebug] ${event}`, payload)
+}
 
 // --- StatusBadge (from ui) ---
 type RunStatus = 'success' | 'running' | 'error' | 'unknown'
@@ -88,7 +92,17 @@ const RunListItem = ({
   return (
     <div className="flex flex-col relative" id={`run-item-${node.runId}`}>
       <div
-        onClick={() => onSelect(node)}
+        onClick={() => {
+          logRunListDebug('click-run-item', {
+            runId: node.runId,
+            depth,
+            selectedId,
+            hasChildren: node.children.length > 0,
+            childCount: node.children.length,
+            timestamp: Date.now(),
+          })
+          onSelect(node)
+        }}
         className={cn(
           'group cursor-pointer py-3 px-4 transition-all border-b border-slate-100 relative',
           isSelected
@@ -1099,6 +1113,7 @@ const GlobalOverview = ({
 export default function App() {
   const [roots, setRoots] = useState<RunTreeNode[]>([])
   const [selectedRun, setSelectedRun] = useState<RunTreeNode | null>(null)
+  const selectedRunRef = useRef<RunTreeNode | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'overview' | 'run'>('run')
@@ -1106,8 +1121,16 @@ export default function App() {
   const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap'>('timeline')
 
   const handleLocate = useCallback((runId: string) => {
+    logRunListDebug('locate-run-requested', {
+      runId,
+      rootsCount: roots.length,
+      selectedRunId: selectedRun?.runId ?? null,
+    })
     const node = findRunInTree(roots, runId)
     if (node) {
+      logRunListDebug('locate-run-found', {
+        runId: node.runId,
+      })
       setSelectedRun(node)
       setViewMode('run')
       setActiveTab('details')
@@ -1122,18 +1145,26 @@ export default function App() {
     }
   }, [roots])
 
+  useEffect(() => {
+    selectedRunRef.current = selectedRun
+  }, [selectedRun])
+
   const loadData = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
     const raw = await loadLocalStore()
     if (!raw) {
       setLoadError(
-        '未找到数据。请将 docs/requests.json 复制到 frontend/public/data/requests.json 后刷新。'
+        '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
       )
       setRoots([])
       setSelectedRun(null)
     } else {
       const tree = buildRunTree(raw)
+        logRunListDebug('load-initial-data-success', {
+          rootsCount: tree.length,
+          firstRunId: tree[0]?.runId ?? null,
+        })
       setRoots(tree)
       setSelectedRun(tree.length > 0 ? tree[0] : null)
     }
@@ -1141,8 +1172,50 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    logRunListDebug('polling-effect-mounted', {})
     loadData()
+    
+    // 实时数据轮询 - 每 5 秒从真实 API 获取最新数据
+    const pollInterval = setInterval(async () => {
+      const realTimeData = await loadRealTimeData()
+      if (realTimeData && realTimeData.requests.length > 0) {
+        console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
+        const tree = buildRunTree(realTimeData)
+        setRoots(tree)
+        // 保持当前选中的 run（如果还存在）
+        const currentSelectedRun = selectedRunRef.current
+        if (currentSelectedRun) {
+          const stillExists = findRunInTree(tree, currentSelectedRun.runId)
+          if (stillExists) {
+            logRunListDebug('poll-keep-selected-run', {
+              selectedRunId: currentSelectedRun.runId,
+            })
+            setSelectedRun(stillExists)
+          } else if (tree.length > 0) {
+            logRunListDebug('poll-selected-run-missing-fallback-first', {
+              previousSelectedRunId: currentSelectedRun.runId,
+              fallbackRunId: tree[0].runId,
+            })
+            setSelectedRun(tree[0])
+          }
+        } else if (tree.length > 0) {
+          logRunListDebug('poll-no-selected-run-fallback-first', {
+            fallbackRunId: tree[0].runId,
+          })
+          setSelectedRun(tree[0])
+        }
+      }
+    }, 5000) // 5 秒轮询一次
+    
+    return () => clearInterval(pollInterval)
   }, [loadData])
+
+  useEffect(() => {
+    logRunListDebug('selected-run-changed', {
+      selectedRunId: selectedRun?.runId ?? null,
+      viewMode,
+    })
+  }, [selectedRun, viewMode])
 
   const totalTokens = selectedRun?.usage.total ?? 0
   const inputRatio =
@@ -1252,6 +1325,11 @@ export default function App() {
                 node={run}
                 selectedId={viewMode === 'run' ? selectedRun?.runId ?? '' : ''}
                 onSelect={(node) => {
+                  logRunListDebug('select-run-from-list', {
+                    runId: node.runId,
+                    previousSelectedRunId: selectedRun?.runId ?? null,
+                    currentViewMode: viewMode,
+                  })
                   setSelectedRun(node)
                   setViewMode('run')
                 }}
@@ -1441,6 +1519,9 @@ export default function App() {
                   ))}
                 </div>
 
+                {/* Context Distribution Treemap */}
+                <ContextDistribution runId={selectedRun.runId} />
+
                 {/* Token Ratio Bar */}
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                   <div className="flex items-center justify-between mb-4">
@@ -1556,7 +1637,14 @@ export default function App() {
                             <tr
                               key={child.runId}
                               className="hover:bg-slate-50/80 transition-colors group cursor-pointer"
-                              onClick={() => setSelectedRun(child)}
+                              onClick={() => {
+                                logRunListDebug('select-child-run-from-table', {
+                                  runId: child.runId,
+                                  parentRunId: selectedRun.runId,
+                                  previousSelectedRunId: selectedRun?.runId ?? null,
+                                })
+                                setSelectedRun(child)
+                              }}
                             >
                               <td className="px-4 py-3">
                                 <span className="mono text-xs font-medium text-slate-600 group-hover:text-blue-600 transition-colors">
