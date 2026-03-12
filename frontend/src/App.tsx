@@ -248,23 +248,14 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
 
   const fullData = useMemo((): TreemapDatum => {
     const transform = (node: RunTreeNode): TreemapDatum => {
-      const childRuns = node.children.length > 0 ? node.children.map(transform) : []
-      const toolBlocks: TreemapDatum[] = node.toolCalls.map((t, i) => ({
-        name: t.toolName,
-        value: Math.max(1, (t.durationMs ?? 0) / 1000),
-        selfValue: Math.max(1, (t.durationMs ?? 0) / 1000),
-        id: t.toolCallId ?? `tool-${node.runId}-${i}`,
-      }))
-      const children = [...childRuns, ...toolBlocks]
+      const children = node.children.length > 0 ? node.children.map(transform) : []
       const childrenTotal = children.reduce((s, c) => s + (c.value ?? 0), 0)
       const selfTotal = node.usage.total
       const subtreeTotal = selfTotal + childrenTotal
-
-      const dateStr = new Date(node.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      const modelShort = node.model ? node.model.split('/').pop() : 'Unknown'
       
       return {
-        name: `${modelShort} (${dateStr})`,
+        // 使用 runId 前缀作为方块标题，保持与 GitGraph / 左侧列表一致
+        name: node.runId.substring(0, 8),
         value: subtreeTotal,
         selfValue: selfTotal,
         input: node.usage.input,
@@ -291,6 +282,12 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
     return node ?? fullData
   }, [fullData, drillRootId])
 
+  const rootTotal = useMemo(
+    () => (fullData.children ?? []).reduce((s, c) => s + (c.value ?? 0), 0),
+    [fullData]
+  )
+  const runCount = runs.length
+
   useEffect(() => {
     if (!svgRef.current) return
     const width = svgRef.current.clientWidth || 800
@@ -305,8 +302,8 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
 
     d3.treemap<TreemapDatum>()
       .size([width, height])
-      .paddingOuter(20)
-      .paddingTop(32)
+      .paddingOuter(16)
+      .paddingTop(28)
       .paddingInner(8)
       .round(true)(root as d3.HierarchyNode<TreemapDatum>)
 
@@ -395,24 +392,34 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden relative">
-      <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between flex-wrap gap-2">
-        <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-          <Database className="w-4 h-4 text-emerald-500" />
-          Token 消耗体积分析 (Treemap)
-        </h3>
+      <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
+          <Database className="w-4 h-4 text-emerald-500" />
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Token 消耗体积分析</h3>
+            <p className="text-[11px] text-slate-500">
+              面积 = Σ token，父块包含所有子块
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 flex-wrap justify-end">
+          <div className="flex items-center gap-2 text-[11px] text-slate-500 bg-white/80 border border-slate-200 rounded-full px-3 py-1 shadow-xs">
+            <span className="mono font-semibold text-slate-800">
+              {rootTotal.toLocaleString()}
+            </span>
+            <span>total tokens</span>
+            <span className="w-px h-3 bg-slate-200" />
+            <span>{runCount} runs</span>
+          </div>
           {drillRootId && (
             <button
               type="button"
               onClick={() => setDrillRootId(null)}
-              className="text-xs font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors"
+              className="text-[11px] font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1 rounded-full transition-colors"
             >
               返回全部
             </button>
           )}
-          <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
-            D3 Treemap · 点击块可钻取
-          </span>
         </div>
       </div>
       <div className="p-4 min-h-[560px]">
@@ -448,6 +455,14 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
                 <span className="text-slate-400">Total Tokens</span>
                 <span className="font-bold font-mono text-white">{hovered.value.toLocaleString()}</span>
               </div>
+              {rootTotal > 0 && (
+                <div className="flex justify-between items-center text-[10px] text-slate-400">
+                  <span>占当前视图</span>
+                  <span className="font-mono text-slate-200">
+                    {((hovered.value / rootTotal) * 100).toFixed(1)}%
+                  </span>
+                </div>
+              )}
               
               <div className="h-1.5 w-full bg-slate-700/50 rounded-full overflow-hidden flex">
                 <div 
@@ -494,7 +509,9 @@ interface GraphNode {
   id: string
   label: string
   kind: GraphNodeKind
+  /** 垂直阶段（同一 row 代表同一阶段，体现“并行”） */
   row: number
+  /** 水平泳道：0 = 父，1+ = 各子 / 工具分支 */
   lane: number
   runId?: string
   usage?: { input: number; output: number; total: number }
@@ -511,19 +528,18 @@ interface GraphEdge {
   label?: string
 }
 
-// Git 式布局：主干在左 (lane 0)，分支向右伸出再合并回主干
+// Git 式布局：主干在左 (lane 0)，所有 subagent 分支在相同阶段纵向对齐，体现“并行”
 function buildGitGraph(node: RunTreeNode): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const nodes: GraphNode[] = []
   const edges: GraphEdge[] = []
   const TRUNK_LANE = 0
-  let row = 0
-  let branchLane = 1
 
+  // 父 run：阶段 0，主干泳道
   const parent: GraphNode = {
     id: node.runId,
     label: node.runId.substring(0, 8),
     kind: (node.sessionKey ?? '').includes('subagent') ? 'subagent' : 'agent',
-    row,
+    row: 0,
     lane: TRUNK_LANE,
     runId: node.runId,
     usage: node.usage,
@@ -531,66 +547,88 @@ function buildGitGraph(node: RunTreeNode): { nodes: GraphNode[]; edges: GraphEdg
     fullData: node,
   }
   nodes.push(parent)
-  row++
 
+  // 没有子 run，则直接结束
   if (node.children.length === 0) {
-    const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row, lane: TRUNK_LANE }
+    const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row: 1, lane: TRUNK_LANE }
     nodes.push(done)
     edges.push({ from: parent, to: done, type: 'merge' })
     return { nodes, edges }
   }
 
-  let lastTrunkNode: GraphNode = parent
+  const maxToolCount =
+    node.children.length === 0
+      ? 0
+      : Math.max(...node.children.map((c) => c.toolCalls.length))
+
+  // 阶段设计：
+  // row 0: 父 run
+  // row 1: 所有子 run（并行）
+  // row 2..(1+maxToolCount): 第 i 个工具调用阶段（各子在自己泳道并行）
+  // row (2+maxToolCount): 子 run 合并回父
+  // row (3+maxToolCount): 父 run 完成
+
+  const CHILD_ROW = 1
+  const TOOL_BASE_ROW = 2
+  const MERGE_CHILD_ROW = TOOL_BASE_ROW + maxToolCount
+  const DONE_ROW = MERGE_CHILD_ROW + 1
+
+  let branchLane = 1
+  const mergeNodes: GraphNode[] = []
+
   for (const child of node.children) {
+    const lane = branchLane++
+
+    // 子 run 节点：并行阶段
     const childNode: GraphNode = {
       id: child.runId,
       label: child.runId.substring(0, 8),
       kind: 'subagent',
-      row,
-      lane: branchLane,
+      row: CHILD_ROW,
+      lane,
       runId: child.runId,
       usage: child.usage,
       status: child.status,
       fullData: child,
     }
     nodes.push(childNode)
-    edges.push({ from: lastTrunkNode, to: childNode, type: 'branch' })
-    row++
+    edges.push({ from: parent, to: childNode, type: 'branch' })
 
+    // 工具调用阶段：每个工具落在对应阶段 row，所有子在同一阶段并行
     let prevOnBranch: GraphNode = childNode
-    for (const tool of child.toolCalls) {
+    child.toolCalls.forEach((tool, idx) => {
+      const toolRow = TOOL_BASE_ROW + idx
       const toolNode: GraphNode = {
         id: tool.toolCallId ?? `tool-${child.runId}-${nodes.length}`,
         label: tool.toolName,
         kind: 'tool',
-        row,
-        lane: branchLane,
+        row: toolRow,
+        lane,
         toolName: tool.toolName,
         durationMs: tool.durationMs,
       }
       nodes.push(toolNode)
       edges.push({ from: prevOnBranch, to: toolNode, type: 'branch' })
       prevOnBranch = toolNode
-      row++
-    }
+    })
 
+    // 每个子 run 的合并节点（与父主干的 merge 阶段对齐）
     const mergeNode: GraphNode = {
       id: `merge-${child.runId}`,
       label: '↩',
       kind: 'merge',
-      row,
+      row: MERGE_CHILD_ROW,
       lane: TRUNK_LANE,
     }
     nodes.push(mergeNode)
     edges.push({ from: prevOnBranch, to: mergeNode, type: 'merge' })
-    lastTrunkNode = mergeNode
-    row++
-    branchLane++
+    mergeNodes.push(mergeNode)
   }
 
-  const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row, lane: TRUNK_LANE }
+  // 所有合并节点再连接到最终完成节点
+  const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row: DONE_ROW, lane: TRUNK_LANE }
   nodes.push(done)
-  edges.push({ from: lastTrunkNode, to: done, type: 'merge' })
+  mergeNodes.forEach((m) => edges.push({ from: m, to: done, type: 'merge' }))
   return { nodes, edges }
 }
 
@@ -729,8 +767,8 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
           Git 式主干 · 分支合并
         </span>
       </div>
-      <div className="overflow-auto p-4 flex justify-start bg-slate-50/20 min-h-[240px] max-h-[720px]">
-        <svg ref={svgRef} width={800} height={1200} className="max-w-full h-auto min-h-[200px]" style={{ minHeight: 200 }} />
+      <div className="overflow-y-auto overflow-x-auto p-4 bg-slate-50/20 min-h-[240px] max-h-[720px]">
+        <svg ref={svgRef} className="block" width={800} height={1200} style={{ minHeight: 200 }} />
       </div>
       <AnimatePresence>
         {hoveredNode && (
