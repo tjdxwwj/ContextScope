@@ -28,10 +28,31 @@ export interface ChainResponse {
     type: 'input' | 'output' | 'tool_call' | 'tool_result' | 'subagent_spawn' | 'subagent_result'
     timestamp: number
     duration?: number
+    input?: {
+      prompt?: string
+      systemPrompt?: string
+      historyMessages?: unknown[]
+      params?: unknown
+      task?: string
+    }
+    output?: {
+      text?: string
+      assistantTexts?: string[]
+      result?: unknown
+      outcome?: string
+    }
     usage?: {
       input: number
       output: number
       total: number
+    }
+    metadata?: {
+      provider?: string
+      model?: string
+      toolName?: string
+      agentId?: string
+      status?: 'success' | 'error' | 'pending'
+      error?: string
     }
   }>
   stats: {
@@ -48,6 +69,89 @@ export interface DateFilter {
   date?: string
   startDate?: string
   endDate?: string
+}
+
+export type TaskStatus = 'running' | 'completed' | 'error' | 'timeout' | 'aborted'
+
+export interface TaskStats {
+  llmCalls: number
+  toolCalls: number
+  subagentSpawns: number
+  totalInput: number
+  totalOutput: number
+  totalTokens: number
+  estimatedCost: number
+}
+
+export interface TaskData {
+  taskId: string
+  sessionId: string
+  sessionKey?: string
+  parentTaskId?: string
+  parentSessionId?: string
+  startTime: number
+  endTime?: number
+  duration?: number
+  status: TaskStatus
+  endReason?: string
+  error?: string
+  stats: TaskStats
+  runIds: string[]
+  childTaskIds?: string[]
+  childSessionIds?: string[]
+  metadata?: {
+    agentId?: string
+    channelId?: string
+    trigger?: string
+    messageProvider?: string
+    depth?: number
+  }
+}
+
+export interface TaskTreeNode {
+  task: TaskData
+  children: TaskTreeNode[]
+  aggregatedStats: TaskStats & {
+    depth: number
+    descendantCount: number
+  }
+}
+
+export async function fetchTasks(params?: {
+  sessionId?: string
+  status?: string
+  limit?: number
+  offset?: number
+}): Promise<TaskData[]> {
+  try {
+    const query = new URLSearchParams()
+    if (params?.sessionId) query.append('sessionId', params.sessionId)
+    if (params?.status) query.append('status', params.status)
+    if (params?.limit != null) query.append('limit', String(params.limit))
+    if (params?.offset != null) query.append('offset', String(params.offset))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    const res = await fetch(`${API_BASE}/tasks${suffix}`)
+    if (!res.ok) return []
+    const data = await res.json()
+    const payload = data?.data ?? data
+    return Array.isArray(payload?.tasks) ? payload.tasks : []
+  } catch (error) {
+    console.error('Failed to fetch tasks:', error)
+    return []
+  }
+}
+
+export async function fetchTaskTree(taskId: string): Promise<TaskTreeNode | null> {
+  try {
+    const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/tree`)
+    if (!res.ok) return null
+    const data = await res.json()
+    const payload = data?.data ?? data
+    return payload?.tree ?? null
+  } catch (error) {
+    console.error('Failed to fetch task tree:', error)
+    return null
+  }
 }
 
 export async function fetchRequests(filter?: DateFilter): Promise<RawStore | null> {

@@ -26,7 +26,20 @@ import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { ContextDistribution } from './components/ContextDistribution'
 import { loadLocalStore, loadRealTimeData } from './data/loadData'
-import { buildRunTree, findRunInTree, type RunTreeNode } from './data/runTree'
+import {
+  fetchChain,
+  fetchTaskTree,
+  fetchTasks,
+  type ChainResponse,
+  type TaskData,
+  type TaskTreeNode,
+} from './data/apiClient'
+import {
+  buildRunTree,
+  findRunInTree,
+  type RunTreeNode,
+  type ToolCallSummary,
+} from './data/runTree'
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -38,6 +51,58 @@ const formatFullTime = (ts: number) =>
   new Date(ts).toLocaleString('zh-CN', { hour12: false })
 const logRunListDebug = (event: string, payload: Record<string, unknown> = {}) => {
   console.log(`[RunListDebug] ${event}`, payload)
+}
+const mapToolCallsFromChain = (chainData: ChainResponse): ToolCallSummary[] => {
+  const items = [...chainData.chain].sort((a, b) => a.timestamp - b.timestamp)
+  const calls = new Map<string, ToolCallSummary>()
+  for (const item of items) {
+    if (item.type === 'tool_call') {
+      const key = item.id || `${item.timestamp}-${item.metadata?.toolName || 'tool'}`
+      calls.set(key, {
+        toolName: item.metadata?.toolName || 'Unknown Tool',
+        toolCallId: item.id,
+        timestamp: item.timestamp,
+        durationMs: item.duration,
+        error:
+          item.metadata?.status === 'error'
+            ? item.metadata.error || 'Tool call failed'
+            : undefined,
+      })
+      continue
+    }
+    if (item.type === 'tool_result') {
+      const key = item.id
+      const found = key ? calls.get(key) : undefined
+      if (found) {
+        if (item.duration != null) found.durationMs = item.duration
+        if (item.metadata?.status === 'error') {
+          found.error = item.metadata.error || found.error || 'Tool call failed'
+        }
+      }
+    }
+  }
+  return Array.from(calls.values()).sort((a, b) => a.timestamp - b.timestamp)
+}
+const taskStatusClass: Record<string, string> = {
+  completed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  running: 'bg-blue-100 text-blue-700 border-blue-200',
+  error: 'bg-rose-100 text-rose-700 border-rose-200',
+  timeout: 'bg-amber-100 text-amber-700 border-amber-200',
+  aborted: 'bg-slate-200 text-slate-700 border-slate-300',
+}
+const taskStatusText: Record<string, string> = {
+  completed: '已完成',
+  running: '进行中',
+  error: '失败',
+  timeout: '超时',
+  aborted: '已中止',
+}
+const formatDuration = (durationMs?: number) => {
+  if (durationMs == null || durationMs < 0) return '-'
+  const seconds = Math.floor(durationMs / 1000)
+  const minutes = Math.floor(seconds / 60)
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`
+  return `${seconds}s`
 }
 
 // --- StatusBadge (from ui) ---
@@ -57,7 +122,7 @@ const StatusBadge = ({ status }: { status: RunStatus }) => {
     error: <AlertCircle className="w-3 h-3" />,
   }
   const currentStatus = isSuccess ? 'success' : isRunning ? 'running' : 'error'
-  const label = isSuccess ? 'Done' : isRunning ? 'Running' : isError ? 'Error' : 'Unknown'
+  const label = isSuccess ? '已完成' : isRunning ? '进行中' : isError ? '失败' : '未知'
   return (
     <span
       className={cn(
@@ -163,7 +228,7 @@ const RunListItem = ({
             <StatusBadge status={node.status} />
           </div>
           <span className="text-[10px] text-slate-400">
-            {formatTime(node.startTime)}
+            {formatFullTime(node.startTime)}
           </span>
         </div>
 
@@ -1202,8 +1267,13 @@ const GlobalOverview = ({
 
 export default function App() {
   const [roots, setRoots] = useState<RunTreeNode[]>([])
+  const [tasks, setTasks] = useState<TaskData[]>([])
   const [selectedRun, setSelectedRun] = useState<RunTreeNode | null>(null)
   const selectedRunRef = useRef<RunTreeNode | null>(null)
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const [selectedTaskTree, setSelectedTaskTree] = useState<TaskTreeNode | null>(null)
+  const [taskTreeLoading, setTaskTreeLoading] = useState(false)
+  const [leftPanelMode, setLeftPanelMode] = useState<'run' | 'task'>('task')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'overview' | 'run'>('run')
@@ -1212,6 +1282,7 @@ export default function App() {
   const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>({})
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [isClearingCache, setIsClearingCache] = useState(false)
+  const [selectedRunChainToolCalls, setSelectedRunChainToolCalls] = useState<ToolCallSummary[] | null>(null)
 
   const handleLocate = useCallback((runId: string) => {
     logRunListDebug('locate-run-requested', {
@@ -1242,10 +1313,75 @@ export default function App() {
     selectedRunRef.current = selectedRun
   }, [selectedRun])
 
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.taskId === selectedTaskId) ?? null,
+    [tasks, selectedTaskId]
+  )
+  const selectedTaskWorkflowRun = useMemo(() => {
+    if (!selectedTask) return null
+    for (const runId of selectedTask.runIds) {
+      const runNode = findRunInTree(roots, runId)
+      if (runNode) return runNode
+    }
+    return null
+  }, [selectedTask, roots])
+
+  useEffect(() => {
+    let canceled = false
+    if (!selectedTaskId) {
+      setSelectedTaskTree(null)
+      setTaskTreeLoading(false)
+      return
+    }
+    setTaskTreeLoading(true)
+    fetchTaskTree(selectedTaskId)
+      .then((tree) => {
+        if (canceled) return
+        setSelectedTaskTree(tree)
+      })
+      .finally(() => {
+        if (!canceled) setTaskTreeLoading(false)
+      })
+    return () => {
+      canceled = true
+    }
+  }, [selectedTaskId])
+
+  useEffect(() => {
+    let canceled = false
+    if (!selectedRun?.runId) {
+      setSelectedRunChainToolCalls(null)
+      return
+    }
+    setSelectedRunChainToolCalls(null)
+    fetchChain(selectedRun.runId)
+      .then((chainData) => {
+        if (canceled || !chainData) return
+        setSelectedRunChainToolCalls(mapToolCallsFromChain(chainData))
+      })
+      .catch(() => {
+        if (!canceled) setSelectedRunChainToolCalls(null)
+      })
+    return () => {
+      canceled = true
+    }
+  }, [selectedRun?.runId])
+
   const loadData = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
-    const raw = await loadLocalStore(dateFilter)
+    const [raw, latestTasks] = await Promise.all([
+      loadLocalStore(dateFilter),
+      fetchTasks({ limit: 100 }),
+    ])
+    setTasks(latestTasks)
+    if (latestTasks.length > 0) {
+      setSelectedTaskId((prev) =>
+        prev && latestTasks.some((task) => task.taskId === prev) ? prev : latestTasks[0].taskId
+      )
+    } else {
+      setSelectedTaskId(null)
+    }
     if (!raw) {
       setLoadError(
         '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
@@ -1367,6 +1503,12 @@ export default function App() {
   }, [selectedRun, viewMode])
 
   const totalTokens = selectedRun?.usage.total ?? 0
+  const selectedRunToolCalls =
+    selectedRunChainToolCalls !== null
+      ? selectedRunChainToolCalls
+      : (selectedRun?.toolCalls ?? [])
+  const loadedCountLabel =
+    leftPanelMode === 'task' ? `${tasks.length} 个用户任务` : `${roots.length} 个大模型调用`
   const inputRatio =
     totalTokens > 0 ? (selectedRun!.usage.input / totalTokens) * 100 : 0
 
@@ -1509,7 +1651,7 @@ export default function App() {
                 ? '加载中…'
                 : loadError
                   ? '无数据'
-                  : `已加载 ${roots.length} 个 Root Run`}
+                  : `已加载 ${loadedCountLabel}`}
             </span>
           </div>
         </div>
@@ -1523,46 +1665,38 @@ export default function App() {
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
-                placeholder="搜索 Run ID..."
+                placeholder={leftPanelMode === 'task' ? '搜索用户任务 ID...' : '搜索大模型调用 ID...'}
                 className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
               />
             </div>
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {/* 全局总览入口 */}
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => setViewMode('overview')}
-              onKeyDown={(e) => e.key === 'Enter' && setViewMode('overview')}
-              className={cn(
-                'mx-4 mt-4 mb-2 p-4 rounded-xl cursor-pointer transition-all border',
-                viewMode === 'overview'
-                  ? 'bg-blue-600 text-white border-blue-700 shadow-md'
-                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-              )}
-            >
-              <div className="flex items-center gap-3">
-                <LayoutDashboard
-                  className={cn('w-5 h-5', viewMode === 'overview' ? 'text-white' : 'text-blue-500')}
-                />
-                <span className="text-sm font-bold">全局总览</span>
-              </div>
-              <p
+            <div className="flex bg-slate-200 p-1 rounded-lg mt-3">
+              <button
+                type="button"
+                onClick={() => setLeftPanelMode('task')}
                 className={cn(
-                  'text-[10px] mt-1',
-                  viewMode === 'overview' ? 'text-blue-100' : 'text-slate-400'
+                  'flex-1 px-3 py-1 text-[11px] font-bold rounded-md transition-all',
+                  leftPanelMode === 'task'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
                 )}
               >
-                查看所有调用链的时间线与统计
-              </p>
+                用户任务视图
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftPanelMode('run')}
+                className={cn(
+                  'flex-1 px-3 py-1 text-[11px] font-bold rounded-md transition-all',
+                  leftPanelMode === 'run'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                )}
+              >
+                大模型调用视图
+              </button>
             </div>
-
-            <div className="px-4 py-2">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                Run 列表
-              </p>
-            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto">
             {loadError && (
               <div className="mx-4 p-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-xs">
                 {loadError}
@@ -1575,34 +1709,262 @@ export default function App() {
                 </button>
               </div>
             )}
-            {!loading && !loadError && roots.length === 0 && (
-              <div className="mx-4 p-4 text-slate-500 text-xs">
-                暂无 run
-              </div>
+            {leftPanelMode === 'run' ? (
+              <>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    setLeftPanelMode('run')
+                    setViewMode('overview')
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      setLeftPanelMode('run')
+                      setViewMode('overview')
+                    }
+                  }}
+                  className={cn(
+                    'mx-4 mt-4 mb-2 p-4 rounded-xl cursor-pointer transition-all border',
+                    viewMode === 'overview'
+                      ? 'bg-blue-600 text-white border-blue-700 shadow-md'
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                  )}
+                >
+                  <div className="flex items-center gap-3">
+                    <LayoutDashboard
+                      className={cn('w-5 h-5', viewMode === 'overview' ? 'text-white' : 'text-blue-500')}
+                    />
+                    <span className="text-sm font-bold">全局总览</span>
+                  </div>
+                  <p
+                    className={cn(
+                      'text-[10px] mt-1',
+                      viewMode === 'overview' ? 'text-blue-100' : 'text-slate-400'
+                    )}
+                  >
+                    查看所有大模型调用链的时间线与统计
+                  </p>
+                </div>
+                <div className="px-4 py-2">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                    大模型调用列表
+                  </p>
+                </div>
+                {!loading && !loadError && roots.length === 0 && (
+                  <div className="mx-4 p-4 text-slate-500 text-xs">
+                    暂无大模型调用
+                  </div>
+                )}
+                {roots.map((run) => (
+                  <RunListItem
+                    key={run.runId}
+                    node={run}
+                    selectedId={viewMode === 'run' ? selectedRun?.runId ?? '' : ''}
+                    onSelect={(node) => {
+                      logRunListDebug('select-run-from-list', {
+                        runId: node.runId,
+                        previousSelectedRunId: selectedRun?.runId ?? null,
+                        currentViewMode: viewMode,
+                      })
+                      setSelectedRun(node)
+                      setLeftPanelMode('run')
+                      setViewMode('run')
+                    }}
+                  />
+                ))}
+              </>
+            ) : (
+              <>
+                <div className="px-4 pt-4 pb-2">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                    用户任务列表
+                  </p>
+                </div>
+                {!loading && !loadError && tasks.length === 0 && (
+                  <div className="mx-4 p-4 text-slate-500 text-xs">
+                    暂无用户任务
+                  </div>
+                )}
+                {tasks.map((task) => (
+                  <button
+                    key={task.taskId}
+                    type="button"
+                    className={cn(
+                      'w-[calc(100%-2rem)] mx-4 mb-2 p-3 text-left rounded-xl border transition-all',
+                      selectedTaskId === task.taskId
+                        ? 'bg-blue-50 border-blue-200'
+                        : 'bg-white border-slate-200 hover:bg-slate-50'
+                    )}
+                    onClick={() => setSelectedTaskId(task.taskId)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="mono text-[11px] font-bold text-slate-700">
+                        {task.taskId.substring(0, 12)}...
+                      </span>
+                      <span
+                        className={cn(
+                          'px-2 py-0.5 text-[10px] font-semibold rounded-full border',
+                          taskStatusClass[task.status] || 'bg-slate-100 text-slate-700 border-slate-200'
+                        )}
+                      >
+                        {taskStatusText[task.status] || task.status}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+                      <span>{formatFullTime(task.startTime)}</span>
+                      <span>{(task.stats.totalTokens || 0).toLocaleString()} Token</span>
+                    </div>
+                  </button>
+                ))}
+              </>
             )}
-            {roots.map((run) => (
-              <RunListItem
-                key={run.runId}
-                node={run}
-                selectedId={viewMode === 'run' ? selectedRun?.runId ?? '' : ''}
-                onSelect={(node) => {
-                  logRunListDebug('select-run-from-list', {
-                    runId: node.runId,
-                    previousSelectedRunId: selectedRun?.runId ?? null,
-                    currentViewMode: viewMode,
-                  })
-                  setSelectedRun(node)
-                  setViewMode('run')
-                }}
-              />
-            ))}
           </div>
         </aside>
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-8 bg-slate-50/30">
           <AnimatePresence mode="wait">
-            {viewMode === 'overview' ? (
+            {leftPanelMode === 'task' ? (
+              !selectedTask ? (
+                <motion.div
+                  key="empty-task"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="max-w-5xl mx-auto py-20 text-center text-slate-500"
+                >
+                  在左侧点击一个用户任务查看详情
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={selectedTask.taskId}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.2 }}
+                  className="max-w-5xl mx-auto space-y-8"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="space-y-1">
+                      <h2 className="mono text-2xl font-bold text-slate-800 tracking-tight break-all">
+                        {selectedTask.taskId}
+                      </h2>
+                      <div className="flex items-center gap-4 text-sm text-slate-500">
+                        <span className="mono text-[11px] bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                          {selectedTask.sessionId}
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="w-4 h-4" />
+                          {formatFullTime(selectedTask.startTime)}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          耗时 {formatDuration(selectedTask.duration)}
+                        </span>
+                      </div>
+                    </div>
+                    <span
+                      className={cn(
+                        'px-3 py-1 text-[11px] font-semibold rounded-full border',
+                        taskStatusClass[selectedTask.status] || 'bg-slate-100 text-slate-700 border-slate-200'
+                      )}
+                    >
+                      {taskStatusText[selectedTask.status] || selectedTask.status}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-4">
+                    {[
+                      { label: 'Total Tokens', value: selectedTask.stats.totalTokens },
+                      { label: 'LLM Calls', value: selectedTask.stats.llmCalls },
+                      { label: 'Tool Calls', value: selectedTask.stats.toolCalls },
+                      { label: 'Subagents', value: selectedTask.stats.subagentSpawns },
+                    ].map((stat) => (
+                      <div
+                        key={stat.label}
+                        className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm"
+                      >
+                        <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
+                          {stat.label}
+                        </p>
+                        <p className="text-2xl font-bold text-slate-900 mono">
+                          {stat.value.toLocaleString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-4">Task 树摘要</h3>
+                    {taskTreeLoading ? (
+                      <p className="text-xs text-slate-500">加载中...</p>
+                    ) : selectedTaskTree ? (
+                      <div className="grid grid-cols-3 gap-4 text-xs">
+                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                          <p className="text-slate-400 uppercase tracking-wider mb-1">最大深度</p>
+                          <p className="text-lg font-bold text-slate-800 mono">
+                            {selectedTaskTree.aggregatedStats.depth}
+                          </p>
+                        </div>
+                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                          <p className="text-slate-400 uppercase tracking-wider mb-1">子任务数</p>
+                          <p className="text-lg font-bold text-slate-800 mono">
+                            {selectedTaskTree.aggregatedStats.descendantCount}
+                          </p>
+                        </div>
+                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                          <p className="text-slate-400 uppercase tracking-wider mb-1">聚合 Tokens</p>
+                          <p className="text-lg font-bold text-slate-800 mono">
+                            {selectedTaskTree.aggregatedStats.totalTokens.toLocaleString()}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">暂无任务树数据</p>
+                    )}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-2">任务调用链工作流</h3>
+                    <p className="text-xs text-slate-500 mb-4">
+                      展示该用户任务中的一次大模型调用工作流（GitGraph 视图）
+                    </p>
+                    {selectedTaskWorkflowRun ? (
+                      <GitGraphVisualizer data={selectedTaskWorkflowRun} />
+                    ) : (
+                      <p className="text-xs text-slate-500">当前任务暂无可展示的调用链</p>
+                    )}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-4">
+                      关联大模型调用 ({selectedTask.runIds.length})
+                    </h3>
+                    {selectedTask.runIds.length === 0 ? (
+                      <p className="text-xs text-slate-500">当前用户任务暂无大模型调用</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {selectedTask.runIds.map((runId) => (
+                          <button
+                            type="button"
+                            key={runId}
+                            className="mono text-[11px] px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 hover:bg-blue-50 hover:border-blue-200"
+                            onClick={() => {
+                              const node = findRunInTree(roots, runId)
+                              if (!node) {
+                                message.warning('该大模型调用不在当前列表，请切换日期范围后重试')
+                                return
+                              }
+                              setSelectedRun(node)
+                              setLeftPanelMode('run')
+                              setViewMode('run')
+                            }}
+                          >
+                            {runId}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )
+            ) : viewMode === 'overview' ? (
               <motion.div
                 key="overview"
                 initial={{ opacity: 0, x: 20 }}
@@ -1651,7 +2013,7 @@ export default function App() {
                 exit={{ opacity: 0 }}
                 className="max-w-5xl mx-auto py-20 text-center text-slate-500"
               >
-                在左侧点击一个 run 查看详情
+                在左侧点击一个大模型调用查看详情
               </motion.div>
             ) : (
               <motion.div
@@ -1823,11 +2185,11 @@ export default function App() {
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                   <h3 className="text-sm font-bold text-slate-800 mb-6 flex items-center gap-2">
                     <Terminal className="w-4 h-4 text-amber-500" />
-                    工具调用序列 ({selectedRun.toolCalls.length})
+                    工具调用序列 ({selectedRunToolCalls.length})
                   </h3>
-                  {selectedRun.toolCalls.length > 0 ? (
+                  {selectedRunToolCalls.length > 0 ? (
                     <div className="space-y-0 relative before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-[2px] before:bg-slate-100">
-                      {selectedRun.toolCalls.map((tool, idx) => (
+                      {selectedRunToolCalls.map((tool, idx) => (
                         <div
                           key={tool.toolCallId ?? idx}
                           className="relative pl-10 pb-8 last:pb-0"
