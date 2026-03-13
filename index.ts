@@ -214,7 +214,7 @@ const plugin = {
         const runId = (event.runId || ctx.runId || '').trim();
         
         // 记录工具调用到任务
-        taskTracker.recordToolCall(ctx.sessionId);
+        taskTracker.recordToolCall(ctx.sessionId as string);
         
         if (runId) {
           const durationMs = typeof event.durationMs === 'number' ? Math.max(0, event.durationMs) : undefined;
@@ -238,7 +238,7 @@ const plugin = {
 
         if (event.toolName === 'sessions_spawn') {
           // 记录子任务生成到任务
-          taskTracker.recordSubagentSpawn(ctx.sessionId);
+          taskTracker.recordSubagentSpawn(ctx.sessionId as string);
           const parentRunId = runId;
           if (!parentRunId) {
             return;
@@ -362,7 +362,7 @@ const plugin = {
           reason = 'error';
         }
         
-        const taskData = await taskTracker.endTask(ctx.sessionId, reason, event.error || undefined);
+        const taskData = await taskTracker.endTask(ctx.sessionId as string, reason, event.error as string | undefined);
         
         if (taskData) {
           const childCount = taskData.childTaskIds?.length || 0;
