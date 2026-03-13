@@ -104,6 +104,8 @@ const plugin = {
           }
         );
         
+        api.logger.debug?.(`[TaskTracker] llm_input: sessionId=${event.sessionId}, taskId=${taskId}`);
+        
         const includeSystemPrompts = config.capture?.includeSystemPrompts !== false;
         const includeMessageHistory = config.capture?.includeMessageHistory !== false;
         
@@ -146,7 +148,8 @@ const plugin = {
     api.on('llm_output', async (event, ctx) => {
       try {
         // 确保任务存在
-        taskTracker.startTask(event.sessionId, ctx.sessionKey);
+        const taskId = taskTracker.startTask(event.sessionId, ctx.sessionKey || undefined);
+        api.logger.debug?.(`[TaskTracker] llm_output: sessionId=${event.sessionId}, taskId=${taskId}`);
         
         const rawUsage = event.usage;
         
@@ -362,6 +365,7 @@ const plugin = {
           reason = 'error';
         }
         
+        api.logger.debug?.(`[TaskTracker] agent_end: sessionId=${ctx.sessionId}, reason=${reason}`);
         const taskData = await taskTracker.endTask(ctx.sessionId as string, reason, event.error as string | undefined);
         
         if (taskData) {
