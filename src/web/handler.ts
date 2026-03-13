@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChainHttpHandler } from './chain-handler.js';
+import { createTaskHttpHandler } from './task-handler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -40,19 +41,24 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
     logger.info(`Frontend dev server: http://localhost:5173`);
   }
 
-  // 鎻愬墠鏋勫缓 ChainHandler锛岄伩鍏嶆瘡娆¤姹傞噸澶嶅垱寤?
+  // 提前构建 handlers，避免每次请求重复创建
   const chainHandler = createChainHttpHandler({ service, logger });
+  const taskHandler = createTaskHttpHandler({ service, logger });
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     const path = url.pathname;
 
     try {
+      // Task API handler (新增)
+      const taskHandled = await taskHandler(req, res);
+      if (taskHandled) return true;
+
       // Chain API handler
       const chainHandled = await chainHandler(req, res);
       if (chainHandled) return true;
 
-      // API 绔偣
+      // API 端点
       if (path === '/plugins/contextscope/api/stats') {
         return await handleStats(req, res, url);
       }

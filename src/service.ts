@@ -9,7 +9,7 @@ import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
 import { TokenEstimationService } from './token-estimator.js';
 import type { ChainResponse, ChainItem, ChainStats } from './types-chain.js';
-import type { PluginLogger } from './types.js';
+import type { PluginLogger, TaskData, TaskTreeNode } from './types.js';
 import { estimateCost, getModelContextWindow } from './types.js';
 
 export interface AnalysisStats {
@@ -217,6 +217,32 @@ export class RequestAnalyzerService {
       throw error;
     }
   }
+
+  // ==================== Task Methods (新增任务方法) ====================
+
+  async getTask(taskId: string): Promise<TaskData | undefined> {
+    return await this.storage.getTask(taskId);
+  }
+
+  async getRecentTasks(limit = 50, sessionId?: string, status?: string): Promise<TaskData[]> {
+    const tasks = await this.storage.getRecentTasks(limit, sessionId);
+    
+    if (status) {
+      return tasks.filter(t => t.status === status);
+    }
+    
+    return tasks;
+  }
+
+  async getTaskTree(taskId: string): Promise<TaskTreeNode | null> {
+    return await this.storage.getTaskTree(taskId);
+  }
+
+  async getTasksBySessionId(sessionId: string, limit = 50): Promise<TaskData[]> {
+    return await this.storage.getTasksBySessionId(sessionId, limit);
+  }
+
+  // ==================== Existing Methods ====================
 
   async captureToolCall(data: ToolCallData): Promise<void> {
     try {
