@@ -9,13 +9,8 @@ import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
 import { TokenEstimationService } from './token-estimator.js';
 import type { ChainResponse, ChainItem, ChainStats } from './types-chain.js';
-
-interface PluginLogger {
-  debug?: (message: string) => void;
-  info: (message: string) => void;
-  warn: (message: string) => void;
-  error: (message: string) => void;
-}
+import type { PluginLogger } from './types.js';
+import { estimateCost, getModelContextWindow } from './types.js';
 
 export interface AnalysisStats {
   totalRequests: number;
@@ -241,7 +236,7 @@ export class RequestAnalyzerService {
 
     const { usage, provider, model, runId } = context;
     const totalTokens = usage.total || 0;
-    const estimatedCost = this.estimateCost(usage, provider, model);
+    const estimatedCost = estimateCost(usage, provider, model);
 
     if (totalTokens > (this.config.alerts.tokenThreshold || 50000)) {
       this.logger.warn(`🚨 High token usage alert: ${totalTokens.toLocaleString()} tokens for run ${runId}`);
@@ -296,7 +291,7 @@ export class RequestAnalyzerService {
       if (request.usage?.total) {
         totalTokens += request.usage.total;
         costCalculations++;
-        stats.totalCost += this.estimateCost(request.usage, request.provider, request.model);
+        stats.totalCost += estimateCost(request.usage, request.provider, request.model);
       }
 
       // Hourly distribution
@@ -408,7 +403,7 @@ export class RequestAnalyzerService {
           utilization: e.windowUtilization,
           summaryApplied: e.summaryApplied
         })),
-        contextWindow: this.getModelContextWindow(mainRequest.model)
+        contextWindow: getModelContextWindow(mainRequest.model)
       };
 
       const dependencyGraph: DependencyGraphData = {
@@ -581,129 +576,7 @@ export class RequestAnalyzerService {
     return text.substring(0, maxLength) + '...[TRUNCATED]';
   }
 
-  private estimateCost(usage: any, provider: string, model: string): number {
-    const totalTokens = usage.total || (usage.input || 0) + (usage.output || 0);
-    
-    const costPer1K: Record<string, number> = {
-      'gpt-4': 0.06,
-      'gpt-4-turbo': 0.03,
-      'gpt-3.5-turbo': 0.002,
-      'claude-3-opus': 0.075,
-      'claude-3-sonnet': 0.015,
-      'claude-3-haiku': 0.003,
-      'qwen': 0.008,
-      'qwen2': 0.004,
-      'default': 0.01
-    };
 
-    const modelKey = Object.keys(costPer1K).find(key => model.toLowerCase().includes(key)) || 'default';
-    const cost = (totalTokens / 1000) * costPer1K[modelKey];
-    
-    return cost;
-  }
-
-  private getModelContextWindow(model: string): number {
-    const modelLower = model.toLowerCase();
-    const windows: Record<string, number> = {
-      'gpt-4': 8192,
-      'gpt-4-turbo': 128000,
-      'gpt-3.5-turbo': 16385,
-      'claude-3': 200000,
-      'qwen': 32768,
-      'qwen2': 128000,
-      'default': 8192
-    };
-
-    for (const [key, value] of Object.entries(windows)) {
-      if (modelLower.includes(key)) {
-        return value;
-      }
-    }
-    return windows['default'];
-  }
-
-  /**
-   * 估算文本的 token 数量
-   * 中文：约 1.5 个字符 = 1 个 token
-   * 英文：约 4 个字符 = 1 个 token
-   */
-  private estimateTokens(text: string): number {
-    if (!text) return 0;
-    
-    const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-    const otherChars = text.length - chineseChars;
-    
-    return Math.round(chineseChars / 1.5 + otherChars / 4);
-  }
-
-  /**
-   * 估算消息数组的 token 数量
-   */
-  private estimateMessagesTokens(messages: any[]): number {
-    if (!messages || messages.length === 0) return 0;
-    
-    let total = 0;
-    messages.forEach(msg => {
-      if (typeof msg.content === 'string') {
-        total += this.estimateTokens(msg.content);
-      } else if (Array.isArray(msg.content)) {
-        // 处理多模态消息
-        msg.content.forEach((item: any) => {
-          if (item.type === 'text' && item.text) {
-            total += this.estimateTokens(item.text);
-          }
-        });
-      }
-    });
-    
-    return total;
-  }
-
-  /**
-   * 当 API 没有返回 usage 时，根据完整上下文估算 token 数量
-   */
-  private estimateUsage(data: any): void {
-    if (!data.usage || data.usage.totalTokens === 0) {
-      let estimatedInput = 0;
-      let estimatedOutput = 0;
-      
-      // 估算 input tokens（system prompt + history + current prompt）
-      if (data.systemPrompt) {
-        estimatedInput += this.estimateTokens(data.systemPrompt);
-        this.logger.debug?.(`System prompt: ${this.estimateTokens(data.systemPrompt)} tokens`);
-      }
-      
-      if (data.historyMessages && data.historyMessages.length > 0) {
-        const historyTokens = this.estimateMessagesTokens(data.historyMessages);
-        estimatedInput += historyTokens;
-        this.logger.debug?.(`History messages: ${historyTokens} tokens`);
-      }
-      
-      if (data.prompt) {
-        const promptTokens = this.estimateTokens(data.prompt);
-        estimatedInput += promptTokens;
-        this.logger.debug?.(`Current prompt: ${promptTokens} tokens`);
-      }
-      
-      // 估算 output tokens
-      if (data.assistantTexts && data.assistantTexts.length > 0) {
-        const content = data.assistantTexts.join('\n');
-        estimatedOutput = this.estimateTokens(content);
-        this.logger.debug?.(`Assistant response: ${estimatedOutput} tokens`);
-      }
-      
-      // 更新 usage
-      data.usage = {
-        input: estimatedInput,
-        output: estimatedOutput,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: estimatedInput + estimatedOutput
-      };
-      
-      this.logger.info?.(`Estimated tokens for run ${data.runId}: input=${estimatedInput}, output=${estimatedOutput}, total=${estimatedInput + estimatedOutput}`);
-    }
-  }
 
   /**
    * 获取时间线详情（包含上下文快照）
@@ -747,7 +620,7 @@ export class RequestAnalyzerService {
       timestamp,
       tokens: contextRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0),
       messages: contextRequests.length,
-      utilization: Math.min(0.95, contextRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0) / this.getModelContextWindow(pointRequest.model)),
+      utilization: Math.min(0.95, contextRequests.reduce((sum, r) => sum + (r.usage?.total || 0), 0) / getModelContextWindow(pointRequest.model)),
       summaryApplied: false,
       contextSnapshot,
       comparison
@@ -953,8 +826,8 @@ export class RequestAnalyzerService {
         modelInfo: {
           name: mainRequest.model,
           provider: mainRequest.provider,
-          contextWindow: this.getModelContextWindow(mainRequest.model),
-          estimatedCost: this.estimateCost(
+          contextWindow: getModelContextWindow(mainRequest.model),
+          estimatedCost: estimateCost(
             { total: tokenDistribution.total },
             mainRequest.provider,
             mainRequest.model
@@ -985,16 +858,16 @@ export class RequestAnalyzerService {
     userPrompt: string,
     historyMessages: any[]
   ): Promise<TokenDistribution> {
-    const systemTokens = this.estimateTokens(systemPrompt);
-    const userPromptTokens = this.estimateTokens(userPrompt);
-    const historyTokens = this.estimateMessagesTokens(historyMessages);
+    const systemTokens = this.tokenEstimator.countTokens(systemPrompt);
+    const userPromptTokens = this.tokenEstimator.countTokens(userPrompt);
+    const historyTokens = this.tokenEstimator.countMessagesTokens(historyMessages);
     
     // 计算工具响应的 tokens
     let toolResponseTokens = 0;
     historyMessages.forEach(msg => {
       if (msg.role === 'tool' || msg.role === 'toolResult') {
         if (typeof msg.content === 'string') {
-          toolResponseTokens += this.estimateTokens(msg.content);
+          toolResponseTokens += this.tokenEstimator.countTokens(msg.content);
         }
       }
     });

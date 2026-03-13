@@ -16,13 +16,6 @@
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
-
-interface PluginLogger {
-  debug?: (message: string) => void;
-  info: (message: string) => void;
-  warn: (message: string) => void;
-  error: (message: string) => void;
-}
 import { RequestAnalyzerStorage } from './src/storage.js';
 import { RequestAnalyzerService } from './src/service.js';
 import { createAnalyzerHttpHandler } from './src/web/handler.js';

@@ -6,13 +6,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-
-interface PluginLogger {
-  debug?: (message: string) => void;
-  info: (message: string) => void;
-  warn: (message: string) => void;
-  error: (message: string) => void;
-}
+import type { PluginLogger } from './types.js';
 
 export interface RequestData {
   id?: number;

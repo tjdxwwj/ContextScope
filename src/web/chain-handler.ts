@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RequestAnalyzerService } from '../service.js';
 import type { PluginConfig } from '../config.js';
+import type { PluginLogger } from '../types.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,13 +10,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const FRONTEND_DIST_PATH = join(__dirname, '..', '..', 'frontend', 'dist');
 const FRONTEND_INDEX_PATH = join(FRONTEND_DIST_PATH, 'index.html');
 const isProduction = existsSync(FRONTEND_INDEX_PATH);
-
-interface PluginLogger {
-  debug?: (message: string) => void;
-  info: (message: string) => void;
-  warn: (message: string) => void;
-  error: (message: string) => void;
-}
 
 export function createChainHttpHandler(params: { service: RequestAnalyzerService; logger: PluginLogger }) {
   const { service, logger } = params;

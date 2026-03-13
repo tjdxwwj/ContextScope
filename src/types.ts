@@ -1,0 +1,99 @@
+/**
+ * Shared Types for ContextScope Plugin
+ */
+
+export interface PluginLogger {
+  debug?: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
+
+export interface PluginConfig {
+  storage?: {
+    maxRequests?: number;
+    retentionDays?: number;
+    compression?: boolean;
+  };
+  visualization?: {
+    theme?: 'light' | 'dark' | 'auto';
+    autoRefresh?: boolean;
+    refreshInterval?: number;
+    charts?: string[];
+  };
+  capture?: {
+    includeSystemPrompts?: boolean;
+    includeMessageHistory?: boolean;
+    anonymizeContent?: boolean;
+    maxPromptLength?: number;
+  };
+  alerts?: {
+    enabled?: boolean;
+    tokenThreshold?: number;
+    costThreshold?: number;
+  };
+}
+
+/**
+ * Model pricing data (per 1K tokens)
+ * Centralized pricing configuration
+ */
+export const MODEL_PRICING: Record<string, number> = {
+  'gpt-4': 0.06,
+  'gpt-4-turbo': 0.03,
+  'gpt-3.5-turbo': 0.002,
+  'claude-3-opus': 0.075,
+  'claude-3-sonnet': 0.015,
+  'claude-3-haiku': 0.003,
+  'qwen': 0.008,
+  'qwen2': 0.004,
+  'default': 0.01
+};
+
+/**
+ * Model context windows
+ * Centralized context window configuration
+ */
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'gpt-4': 8192,
+  'gpt-4-turbo': 128000,
+  'gpt-3.5-turbo': 16385,
+  'claude-3': 200000,
+  'qwen': 32768,
+  'qwen2': 128000,
+  'default': 8192
+};
+
+/**
+ * Get pricing for a model
+ */
+export function getModelPricing(model: string): number {
+  const modelKey = Object.keys(MODEL_PRICING).find(key => model.toLowerCase().includes(key)) || 'default';
+  return MODEL_PRICING[modelKey];
+}
+
+/**
+ * Get context window for a model
+ */
+export function getModelContextWindow(model: string): number {
+  const modelLower = model.toLowerCase();
+  for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (modelLower.includes(key)) {
+      return value;
+    }
+  }
+  return MODEL_CONTEXT_WINDOWS['default'];
+}
+
+/**
+ * Estimate cost based on token usage
+ */
+export function estimateCost(usage: {
+  input?: number;
+  output?: number;
+  total?: number;
+}, provider: string, model: string): number {
+  const totalTokens = usage.total || (usage.input || 0) + (usage.output || 0);
+  const costPer1K = getModelPricing(model);
+  return (totalTokens / 1000) * costPer1K;
+}
