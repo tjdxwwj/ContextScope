@@ -94,9 +94,9 @@ const plugin = {
         // 确保任务已创建
         const taskId = taskTracker.startTask(
           event.sessionId,
-          ctx.sessionKey || undefined,
-          undefined,  // parentTaskId
-          undefined,  // parentSessionId
+          ctx.sessionKey,
+          undefined,
+          undefined,
           {
             agentId: ctx.agentId,
             channelId: ctx.channelId,
@@ -146,7 +146,7 @@ const plugin = {
     api.on('llm_output', async (event, ctx) => {
       try {
         // 确保任务存在
-        taskTracker.startTask(event.sessionId, ctx.sessionKey || undefined);
+        taskTracker.startTask(event.sessionId, ctx.sessionKey);
         
         const rawUsage = event.usage;
         
