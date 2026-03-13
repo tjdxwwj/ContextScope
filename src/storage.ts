@@ -6,12 +6,13 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import type { PluginLogger } from './types.js';
+import type { PluginLogger, TaskData, TaskStats, TaskTreeNode } from './types.js';
 
 export interface RequestData {
   id?: number;
   type: 'input' | 'output';
   runId: string;
+  taskId?: string;  // ← 新增：关联任务 ID
   sessionId: string;
   sessionKey?: string;
   provider: string;
@@ -88,6 +89,7 @@ export class RequestAnalyzerStorage {
   private legacyDataFile: string;
   private metaFile: string;
   private requests: RequestData[] = [];
+  private tasks: TaskData[] = [];  // ← 新增：任务数组
   private subagentLinks: SubagentLinkData[] = [];
   private toolCalls: ToolCallData[] = [];
   private options: StorageOptions;
@@ -136,14 +138,17 @@ export class RequestAnalyzerStorage {
         const content = fs.readFileSync(filePath, 'utf-8');
         const data = JSON.parse(content);
         this.requests.push(...(data.requests || []));
+        this.tasks.push(...(data.tasks || []));  // ← 新增
         this.subagentLinks.push(...(data.subagentLinks || []));
         this.toolCalls.push(...(data.toolCalls || []));
       }
 
       this.requests = this.sortByTimestampDesc(this.requests);
+      this.tasks = this.tasks.sort((a, b) => b.startTime - a.startTime);  // ← 新增
       this.subagentLinks = this.sortByTimestampDesc(this.subagentLinks);
       this.toolCalls = this.sortByTimestampDesc(this.toolCalls);
       this.requests = this.deduplicateById(this.requests);
+      this.tasks = this.deduplicateTasks(this.tasks);  // ← 新增
       this.subagentLinks = this.deduplicateById(this.subagentLinks);
       this.toolCalls = this.deduplicateById(this.toolCalls);
 
@@ -173,6 +178,7 @@ export class RequestAnalyzerStorage {
     try {
       const grouped = new Map<string, {
         requests: RequestData[];
+        tasks: TaskData[];  // ← 新增
         subagentLinks: SubagentLinkData[];
         toolCalls: ToolCallData[];
       }>();
@@ -180,15 +186,24 @@ export class RequestAnalyzerStorage {
       for (const request of this.requests) {
         const key = this.getDateKey(request.timestamp);
         if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
         }
         grouped.get(key)!.requests.push(request);
+      }
+
+      // 按日期分组任务
+      for (const task of this.tasks) {
+        const key = this.getDateKey(task.startTime);
+        if (!grouped.has(key)) {
+          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+        }
+        grouped.get(key)!.tasks.push(task);
       }
 
       for (const link of this.subagentLinks) {
         const key = this.getDateKey(link.timestamp);
         if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
         }
         grouped.get(key)!.subagentLinks.push(link);
       }
@@ -196,7 +211,7 @@ export class RequestAnalyzerStorage {
       for (const toolCall of this.toolCalls) {
         const key = this.getDateKey(toolCall.timestamp);
         if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], subagentLinks: [], toolCalls: [] });
+          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
         }
         grouped.get(key)!.toolCalls.push(toolCall);
       }
@@ -208,6 +223,7 @@ export class RequestAnalyzerStorage {
         const payload = {
           date: dateKey,
           requests: this.sortByTimestampDesc(data.requests),
+          tasks: data.tasks,  // ← 新增
           subagentLinks: this.sortByTimestampDesc(data.subagentLinks),
           toolCalls: this.sortByTimestampDesc(data.toolCalls),
           lastUpdated: Date.now()
@@ -264,6 +280,174 @@ export class RequestAnalyzerStorage {
     if (!this.initialized) await this.initialize();
     return this.requests.find(r => r.runId === runId && r.type === 'input');
   }
+
+  // ==================== Task Methods (新增任务方法) ====================
+
+  /**
+   * Capture task data
+   */
+  async captureTask(data: TaskData): Promise<void> {
+    if (!this.initialized) await this.initialize();
+
+    try {
+      // Check if task already exists
+      const existingIndex = this.tasks.findIndex(t => t.taskId === data.taskId);
+
+      if (existingIndex >= 0) {
+        // Update existing task
+        this.tasks[existingIndex] = { ...this.tasks[existingIndex], ...data };
+        this.options.logger.debug?.(`Updated task ${data.taskId}`);
+      } else {
+        // Add new task
+        this.tasks.unshift(data);
+        this.options.logger.debug?.(`Captured new task ${data.taskId}`);
+      }
+
+      this.cleanupOldRequests();
+      await this.persist();
+    } catch (error) {
+      this.options.logger.error(`Failed to capture task: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Update task stats
+   */
+  async updateTaskStats(taskId: string, stats: Partial<TaskStats>): Promise<void> {
+    if (!this.initialized) await this.initialize();
+
+    const task = this.tasks.find(t => t.taskId === taskId);
+    if (task) {
+      task.stats = { ...task.stats, ...stats };
+      await this.persist();
+      this.options.logger.debug?.(`Updated stats for task ${taskId}`);
+    }
+  }
+
+  /**
+   * Get task by taskId
+   */
+  async getTask(taskId: string): Promise<TaskData | undefined> {
+    if (!this.initialized) await this.initialize();
+    return this.tasks.find(t => t.taskId === taskId);
+  }
+
+  /**
+   * Get task by sessionId
+   */
+  async getTaskBySessionId(sessionId: string): Promise<TaskData | undefined> {
+    if (!this.initialized) await this.initialize();
+    return this.tasks.find(t => t.sessionId === sessionId);
+  }
+
+  /**
+   * Get task by sessionKey
+   */
+  async getTaskBySessionKey(sessionKey: string): Promise<TaskData | undefined> {
+    if (!this.initialized) await this.initialize();
+    return this.tasks.find(t => t.sessionKey === sessionKey);
+  }
+
+  /**
+   * Get recent tasks
+   */
+  async getRecentTasks(limit = 50, sessionId?: string): Promise<TaskData[]> {
+    if (!this.initialized) await this.initialize();
+
+    let tasks = sessionId
+      ? this.tasks.filter(t => t.sessionId === sessionId)
+      : this.tasks.filter(t => !t.parentTaskId); // Only root tasks
+
+    return tasks
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, limit);
+  }
+
+  /**
+   * Get task tree (with aggregated stats)
+   */
+  async getTaskTree(rootTaskId: string): Promise<TaskTreeNode | null> {
+    const rootTask = await this.getTask(rootTaskId);
+    if (!rootTask) return null;
+
+    // Recursively build tree
+    const buildTree = async (task: TaskData): Promise<TaskTreeNode> => {
+      const children: TaskTreeNode[] = [];
+
+      if (task.childTaskIds) {
+        for (const childTaskId of task.childTaskIds) {
+          const childTask = await this.getTask(childTaskId);
+          if (childTask) {
+            children.push(await buildTree(childTask));
+          }
+        }
+      }
+
+      // Calculate aggregated stats
+      const aggregatedStats = this.aggregateStats(task, children);
+
+      return {
+        task,
+        children,
+        aggregatedStats
+      };
+    };
+
+    return await buildTree(rootTask);
+  }
+
+  /**
+   * Get tasks by session ID
+   */
+  async getTasksBySessionId(sessionId: string, limit = 50): Promise<TaskData[]> {
+    if (!this.initialized) await this.initialize();
+    return this.tasks
+      .filter(t => t.sessionId === sessionId)
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, limit);
+  }
+
+  /**
+   * Aggregate stats (recursive)
+   */
+  private aggregateStats(task: TaskData, children: TaskTreeNode[]): TaskTreeNode['aggregatedStats'] {
+    const childStats = children.reduce((acc, child) => ({
+      llmCalls: acc.llmCalls + child.aggregatedStats.llmCalls,
+      toolCalls: acc.toolCalls + child.aggregatedStats.toolCalls,
+      subagentSpawns: acc.subagentSpawns + child.aggregatedStats.subagentSpawns,
+      totalInput: acc.totalInput + child.aggregatedStats.totalInput,
+      totalOutput: acc.totalOutput + child.aggregatedStats.totalOutput,
+      totalTokens: acc.totalTokens + child.aggregatedStats.totalTokens,
+      estimatedCost: acc.estimatedCost + child.aggregatedStats.estimatedCost,
+      depth: Math.max(acc.depth, child.aggregatedStats.depth),
+      descendantCount: acc.descendantCount + child.aggregatedStats.descendantCount + 1
+    }), {
+      llmCalls: 0,
+      toolCalls: 0,
+      subagentSpawns: 0,
+      totalInput: 0,
+      totalOutput: 0,
+      totalTokens: 0,
+      estimatedCost: 0,
+      depth: 0,
+      descendantCount: 0
+    });
+
+    return {
+      llmCalls: task.stats.llmCalls + childStats.llmCalls,
+      toolCalls: task.stats.toolCalls + childStats.toolCalls,
+      subagentSpawns: task.stats.subagentSpawns + childStats.subagentSpawns,
+      totalInput: task.stats.totalInput + childStats.totalInput,
+      totalOutput: task.stats.totalOutput + childStats.totalOutput,
+      totalTokens: task.stats.totalTokens + childStats.totalTokens,
+      estimatedCost: task.stats.estimatedCost + childStats.estimatedCost,
+      depth: 1 + childStats.depth,
+      descendantCount: childStats.descendantCount
+    };
+  }
+
+  // ==================== Existing Methods ====================
 
   async captureSubagentLink(data: SubagentLinkData): Promise<void> {
     if (!this.initialized) await this.initialize();
@@ -554,6 +738,17 @@ export class RequestAnalyzerStorage {
       removedSubagentLinks,
       removedToolCalls
     };
+  }
+
+  private deduplicateTasks(items: TaskData[]): TaskData[] {
+    const seen = new Set<string>();
+    return items.filter(item => {
+      if (seen.has(item.taskId)) {
+        return false;
+      }
+      seen.add(item.taskId);
+      return true;
+    });
   }
 
   private getDateKey(timestamp: number): string {

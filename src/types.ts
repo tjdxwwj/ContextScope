@@ -9,6 +9,70 @@ export interface PluginLogger {
   error: (message: string) => void;
 }
 
+// ==================== Task Types (任务树架构) ====================
+
+export type TaskStatus = 'running' | 'completed' | 'error' | 'timeout' | 'aborted';
+
+export interface TaskStats {
+  llmCalls: number;
+  toolCalls: number;
+  subagentSpawns: number;
+  totalInput: number;
+  totalOutput: number;
+  totalTokens: number;
+  estimatedCost: number;
+}
+
+export interface TaskData {
+  taskId: string;
+  sessionId: string;
+  sessionKey?: string;
+  parentTaskId?: string;
+  parentSessionId?: string;
+  startTime: number;
+  endTime?: number;
+  duration?: number;
+  status: TaskStatus;
+  endReason?: string;
+  error?: string;
+  stats: TaskStats;
+  runIds: string[];
+  childTaskIds?: string[];
+  childSessionIds?: string[];
+  metadata: {
+    agentId?: string;
+    channelId?: string;
+    trigger?: string;
+    messageProvider?: string;
+    depth?: number;
+  };
+}
+
+export interface ActiveTask {
+  taskId: string;
+  sessionId: string;
+  sessionKey?: string;
+  parentTaskId?: string;
+  parentSessionId?: string;
+  startTime: number;
+  runIds: Set<string>;
+  llmCalls: number;
+  toolCalls: number;
+  subagentSpawns: number;
+  totalInput: number;
+  totalOutput: number;
+  metadata: TaskData['metadata'];
+}
+
+export interface TaskTreeNode {
+  task: TaskData;
+  children: TaskTreeNode[];
+  aggregatedStats: TaskStats & {
+    depth: number;
+    descendantCount: number;
+  };
+}
+
 export interface PluginConfig {
   storage?: {
     maxRequests?: number;

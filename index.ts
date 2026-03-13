@@ -21,6 +21,7 @@ import { RequestAnalyzerService } from './src/service.js';
 import { createAnalyzerHttpHandler } from './src/web/handler.js';
 import { configSchema } from './src/config.js';
 import { TokenEstimationService } from './src/token-estimator.js';
+import { TaskTracker } from './src/task-tracker.js';
 
 interface PluginConfig {
   storage?: {
@@ -72,6 +73,13 @@ const plugin = {
     // Token 计算服务
     const tokenEstimator = new TokenEstimationService({ model: 'gpt-3.5-turbo' });
 
+    // 任务追踪器 (新增)
+    const taskTracker = new TaskTracker(storage, api.logger, {
+      taskTimeoutMs: 600000,  // 10 分钟
+      maxActiveTasks: 100,
+      enableLogging: true
+    });
+
     // Register HTTP route for dashboard
     api.registerHttpRoute({
       path: '/plugins/contextscope',
@@ -83,6 +91,19 @@ const plugin = {
     // Register hooks for capturing requests
     api.on('llm_input', async (event, ctx) => {
       try {
+        // 确保任务已创建
+        const taskId = taskTracker.startTask(
+          event.sessionId,
+          ctx.sessionKey || undefined,
+          undefined,  // parentTaskId
+          undefined,  // parentSessionId
+          {
+            agentId: ctx.agentId,
+            channelId: ctx.channelId,
+            trigger: ctx.trigger
+          }
+        );
+        
         const includeSystemPrompts = config.capture?.includeSystemPrompts !== false;
         const includeMessageHistory = config.capture?.includeMessageHistory !== false;
         
@@ -96,6 +117,7 @@ const plugin = {
         await service.captureRequest({
           type: 'input',
           runId: event.runId,
+          taskId,  // ← 新增：关联 taskId
           sessionId: event.sessionId,
           sessionKey: ctx.sessionKey,
           provider: event.provider,
@@ -123,6 +145,9 @@ const plugin = {
 
     api.on('llm_output', async (event, ctx) => {
       try {
+        // 确保任务存在
+        taskTracker.startTask(event.sessionId, ctx.sessionKey || undefined);
+        
         const rawUsage = event.usage;
         
         // 从 storage 获取对应的 input request 来计算准确的 input tokens
@@ -142,6 +167,14 @@ const plugin = {
               output: 0,
               total: inputTokens,
             };
+        
+        // 记录到任务追踪器
+        taskTracker.recordLLMCall(
+          event.sessionId,
+          event.runId,
+          inputTokens,
+          rawUsage?.output ?? 0
+        );
         
         await service.captureResponse({
           type: 'output',
@@ -179,6 +212,10 @@ const plugin = {
       try {
         const now = Date.now();
         const runId = (event.runId || ctx.runId || '').trim();
+        
+        // 记录工具调用到任务
+        taskTracker.recordToolCall(ctx.sessionId);
+        
         if (runId) {
           const durationMs = typeof event.durationMs === 'number' ? Math.max(0, event.durationMs) : undefined;
           await service.captureToolCall({
@@ -200,6 +237,8 @@ const plugin = {
         }
 
         if (event.toolName === 'sessions_spawn') {
+          // 记录子任务生成到任务
+          taskTracker.recordSubagentSpawn(ctx.sessionId);
           const parentRunId = runId;
           if (!parentRunId) {
             return;
@@ -311,6 +350,35 @@ const plugin = {
         });
       } catch (error) {
         api.logger.warn(`Failed to capture subagent ended: ${error}`);
+      }
+    });
+
+    // === Agent End Hook (关键：结束任务) ===
+    api.on('agent_end', async (event, ctx) => {
+      try {
+        let reason: 'completed' | 'error' | 'timeout' | 'aborted' = 'completed';
+        
+        if (event.error) {
+          reason = 'error';
+        }
+        
+        const taskData = await taskTracker.endTask(ctx.sessionId, reason, event.error || undefined);
+        
+        if (taskData) {
+          const childCount = taskData.childTaskIds?.length || 0;
+          const childNote = childCount > 0 ? ` (with ${childCount} subagents)` : '';
+          
+          api.logger.info(
+            `✅ Task ${taskData.taskId}${childNote} completed: ` +
+            `${taskData.stats.llmCalls} LLM calls, ` +
+            `${taskData.stats.toolCalls} tools, ` +
+            `${taskData.stats.subagentSpawns} subagents, ` +
+            `${taskData.stats.totalTokens} tokens, ` +
+            `$${taskData.stats.estimatedCost.toFixed(4)}`
+          );
+        }
+      } catch (error) {
+        api.logger.warn(`Failed to end task: ${error}`);
       }
     });
 
