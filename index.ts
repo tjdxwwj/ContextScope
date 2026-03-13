@@ -92,7 +92,7 @@ const plugin = {
     api.on('llm_input', async (event, ctx) => {
       try {
         // 确保任务已创建
-        const taskId = taskTracker.startTask(
+        const taskId = await taskTracker.startTask(
           event.sessionId,
           ctx.sessionKey,
           undefined,
@@ -148,7 +148,7 @@ const plugin = {
     api.on('llm_output', async (event, ctx) => {
       try {
         // 确保任务存在
-        const taskId = taskTracker.startTask(event.sessionId, ctx.sessionKey || undefined);
+        const taskId = await taskTracker.startTask(event.sessionId, ctx.sessionKey || undefined);
         api.logger.debug?.(`[TaskTracker] llm_output: sessionId=${event.sessionId}, taskId=${taskId}`);
         
         const rawUsage = event.usage;
@@ -172,7 +172,7 @@ const plugin = {
             };
         
         // 记录到任务追踪器
-        taskTracker.recordLLMCall(
+        await taskTracker.recordLLMCall(
           event.sessionId,
           event.runId,
           inputTokens,
@@ -217,7 +217,7 @@ const plugin = {
         const runId = (event.runId || ctx.runId || '').trim();
         
         // 记录工具调用到任务
-        taskTracker.recordToolCall(ctx.sessionId as string);
+        await taskTracker.recordToolCall(ctx.sessionId as string);
         
         if (runId) {
           const durationMs = typeof event.durationMs === 'number' ? Math.max(0, event.durationMs) : undefined;
@@ -241,7 +241,7 @@ const plugin = {
 
         if (event.toolName === 'sessions_spawn') {
           // 记录子任务生成到任务
-          taskTracker.recordSubagentSpawn(ctx.sessionId as string);
+          await taskTracker.recordSubagentSpawn(ctx.sessionId as string);
           const parentRunId = runId;
           if (!parentRunId) {
             return;

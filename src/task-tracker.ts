@@ -2,11 +2,11 @@
  * Task Tracker for ContextScope
  * 
  * Tracks task lifecycle, aggregates statistics, and handles subagent relationships.
- * Supports automatic task boundary detection via agent_end hook.
+ * Strategy: Query storage for task state instead of relying on memory.
  */
 
 import type { RequestAnalyzerStorage } from './storage.js';
-import type { TaskData, TaskStats, ActiveTask, TaskStatus } from './types.js';
+import type { TaskData, TaskStats, TaskStatus } from './types.js';
 
 export interface TaskTrackerOptions {
   taskTimeoutMs?: number;        // Default: 10 minutes
@@ -15,13 +15,11 @@ export interface TaskTrackerOptions {
 }
 
 export class TaskTracker {
-  private activeTasks = new Map<string, ActiveTask>(); // sessionId -> task
   private storage: RequestAnalyzerStorage;
   private logger: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void };
   private readonly taskTimeoutMs: number;
   private readonly maxActiveTasks: number;
   private readonly enableLogging: boolean;
-  private taskTimeouts = new Map<string, NodeJS.Timeout>();
 
   constructor(
     storage: RequestAnalyzerStorage,
@@ -37,49 +35,51 @@ export class TaskTracker {
 
   /**
    * Start or get existing task
+   * Strategy: Query storage for unfinished task instead of relying on memory
    */
-  startTask(
+  async startTask(
     sessionId: string,
     sessionKey?: string,
     parentTaskId?: string,
     parentSessionId?: string,
     metadata?: Partial<TaskData['metadata']>
-  ): string {
-    const existing = this.activeTasks.get(sessionId);
+  ): Promise<string> {
+    // Query storage for existing unfinished task
+    const existingTask = await this.storage.getTaskBySessionId(sessionId);
     
-    if (existing) {
-      this.logDebug(`Reusing active task ${existing.taskId} for session ${sessionId}`);
-      return existing.taskId;
+    if (existingTask && existingTask.status === 'running') {
+      this.logDebug?.(`Reusing existing task ${existingTask.taskId} for session ${sessionId}`);
+      return existingTask.taskId;
     }
     
-    // Check max active tasks limit
-    if (this.activeTasks.size >= this.maxActiveTasks) {
-      this.logWarn(`Max active tasks (${this.maxActiveTasks}) reached, forcing cleanup`);
-      this.cleanupOldTasks();
-    }
-    
+    // Create new task
     const taskId = `task_${Date.now()}_${sessionId.split('-')[0]}`;
-    const task: ActiveTask = {
+    const taskData: TaskData = {
       taskId,
       sessionId,
       sessionKey,
       parentTaskId,
       parentSessionId,
       startTime: Date.now(),
-      runIds: new Set(),
-      llmCalls: 0,
-      toolCalls: 0,
-      subagentSpawns: 0,
-      totalInput: 0,
-      totalOutput: 0,
+      status: 'running',
+      stats: {
+        llmCalls: 0,
+        toolCalls: 0,
+        subagentSpawns: 0,
+        totalInput: 0,
+        totalOutput: 0,
+        totalTokens: 0,
+        estimatedCost: 0
+      },
+      runIds: [],
       metadata: { 
         ...metadata, 
         depth: parentTaskId ? 1 : 0 
       }
     };
     
-    this.activeTasks.set(sessionId, task);
-    this.setupTimeout(sessionId);
+    // Persist immediately
+    await this.storage.captureTask(taskData);
     
     this.logInfo(`Started new task ${taskId} for session ${sessionId}`);
     
@@ -89,38 +89,49 @@ export class TaskTracker {
   /**
    * Record LLM call
    */
-  recordLLMCall(sessionId: string, runId: string, input: number, output: number): void {
-    const task = this.activeTasks.get(sessionId);
+  async recordLLMCall(sessionId: string, runId: string, input: number, output: number): Promise<void> {
+    const task = await this.storage.getTaskBySessionId(sessionId);
     if (!task) {
-      this.logWarn(`LLM call without active task for session ${sessionId}`);
+      this.logWarn?.(`LLM call without active task for session ${sessionId}`);
       return;
     }
     
-    task.runIds.add(runId);
-    task.llmCalls++;
-    task.totalInput += input;
-    task.totalOutput += output;
+    // Update task stats
+    task.stats.llmCalls++;
+    task.stats.totalInput += input;
+    task.stats.totalOutput += output;
+    task.stats.totalTokens = task.stats.totalInput + task.stats.totalOutput;
+    task.stats.estimatedCost = this.estimateCost(task.stats.totalTokens);
     
-    this.logDebug(`Task ${task.taskId}: LLM call #${task.llmCalls} (${input} in, ${output} out)`);
+    if (!task.runIds.includes(runId)) {
+      task.runIds.push(runId);
+    }
+    
+    // Persist update
+    await this.storage.captureTask(task);
+    
+    this.logDebug?.(`Task ${task.taskId}: LLM call #${task.stats.llmCalls} (${input} in, ${output} out)`);
   }
 
   /**
    * Record tool call
    */
-  recordToolCall(sessionId: string): void {
-    const task = this.activeTasks.get(sessionId);
+  async recordToolCall(sessionId: string): Promise<void> {
+    const task = await this.storage.getTaskBySessionId(sessionId);
     if (task) {
-      task.toolCalls++;
+      task.stats.toolCalls++;
+      await this.storage.captureTask(task);
     }
   }
 
   /**
    * Record subagent spawn
    */
-  recordSubagentSpawn(sessionId: string): void {
-    const task = this.activeTasks.get(sessionId);
+  async recordSubagentSpawn(sessionId: string): Promise<void> {
+    const task = await this.storage.getTaskBySessionId(sessionId);
     if (task) {
-      task.subagentSpawns++;
+      task.stats.subagentSpawns++;
+      await this.storage.captureTask(task);
     }
   }
 
@@ -132,126 +143,34 @@ export class TaskTracker {
     reason: 'completed' | 'error' | 'timeout' | 'aborted' = 'completed',
     error?: string
   ): Promise<TaskData | null> {
-    const task = this.activeTasks.get(sessionId);
+    const task = await this.storage.getTaskBySessionId(sessionId);
     if (!task) {
-      this.logWarn(`Ending task without active task for session ${sessionId}`);
+      this.logWarn?.(`Ending task without active task for session ${sessionId}`);
       return null;
     }
     
-    // Clear timeout
-    this.clearTimeout(sessionId);
+    // Update task status
+    task.endTime = Date.now();
+    task.duration = task.endTime - task.startTime;
+    task.status = this.mapReasonToStatus(reason);
+    task.endReason = reason;
+    task.error = error;
     
-    // Query subagent links
-    const subagentLinks = await this.storage.getSubagentLinks({ parentSessionId: sessionId });
-    const childTaskIds: string[] = [];
-    const childSessionIds: string[] = [];
+    // Persist update
+    await this.storage.captureTask(task);
     
-    for (const link of subagentLinks) {
-      if (link.childSessionKey) {
-        // Find child task by sessionKey
-        const childTask = Array.from(this.activeTasks.values()).find(t => t.sessionKey === link.childSessionKey);
-        if (childTask) {
-          childTaskIds.push(childTask.taskId);
-          childSessionIds.push(link.childSessionKey.split(':').pop() || link.childSessionKey);
-        }
-      }
-    }
-    
-    // Build task data
-    const taskData: TaskData = {
-      taskId: task.taskId,
-      sessionId: task.sessionId,
-      sessionKey: task.sessionKey,
-      parentTaskId: task.parentTaskId,
-      parentSessionId: task.parentSessionId,
-      startTime: task.startTime,
-      endTime: Date.now(),
-      duration: Date.now() - task.startTime,
-      status: this.mapReasonToStatus(reason),
-      endReason: reason,
-      error,
-      stats: this.calculateStats(task),
-      runIds: Array.from(task.runIds),
-      childTaskIds: childTaskIds.length > 0 ? childTaskIds : undefined,
-      childSessionIds: childSessionIds.length > 0 ? childSessionIds : undefined,
-      metadata: task.metadata
-    };
-    
-    // Persist
-    await this.storage.captureTask(taskData);
-    
-    // Clean up active task
-    this.activeTasks.delete(sessionId);
-    
-    const childCount = childTaskIds.length;
+    const childCount = task.childTaskIds?.length || 0;
     const childNote = childCount > 0 ? ` (with ${childCount} subagents)` : '';
     
     this.logInfo(
       `Task ${task.taskId}${childNote} ended: ` +
-      `${task.llmCalls} LLM calls, ` +
-      `${task.toolCalls} tool calls, ` +
-      `${task.subagentSpawns} subagents, ` +
-      `${task.totalInput + task.totalOutput} tokens`
+      `${task.stats.llmCalls} LLM calls, ` +
+      `${task.stats.toolCalls} tool calls, ` +
+      `${task.stats.subagentSpawns} subagents, ` +
+      `${task.stats.totalTokens} tokens`
     );
     
-    return taskData;
-  }
-
-  /**
-   * Get active task count
-   */
-  getActiveTaskCount(): number {
-    return this.activeTasks.size;
-  }
-
-  /**
-   * Get active task by session ID
-   */
-  getActiveTask(sessionId: string): ActiveTask | undefined {
-    return this.activeTasks.get(sessionId);
-  }
-
-  /**
-   * Clean up old active tasks (keep most recent)
-   */
-  private cleanupOldTasks(): void {
-    const entries = Array.from(this.activeTasks.entries());
-    const toRemove = entries.slice(0, entries.length - this.maxActiveTasks + 10);
-    
-    for (const [sessionId] of toRemove) {
-      this.logWarn(`Force ending old task for session ${sessionId}`);
-      this.endTask(sessionId, 'aborted').catch(err => {
-        this.logWarn(`Failed to end old task: ${err}`);
-      });
-    }
-  }
-
-  /**
-   * Setup timeout cleanup
-   */
-  private setupTimeout(sessionId: string): void {
-    const existingTimeout = this.taskTimeouts.get(sessionId);
-    if (existingTimeout) {
-      clearTimeout(existingTimeout);
-    }
-    
-    const timeout = setTimeout(async () => {
-      this.logWarn(`Task timeout for session ${sessionId}, forcing end`);
-      await this.endTask(sessionId, 'timeout');
-    }, this.taskTimeoutMs);
-    
-    this.taskTimeouts.set(sessionId, timeout);
-  }
-
-  /**
-   * Clear timeout
-   */
-  private clearTimeout(sessionId: string): void {
-    const timeout = this.taskTimeouts.get(sessionId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this.taskTimeouts.delete(sessionId);
-    }
+    return task;
   }
 
   /**
@@ -265,21 +184,6 @@ export class TaskTracker {
       case 'aborted': return 'aborted';
       default: return 'completed';
     }
-  }
-
-  /**
-   * Calculate task stats
-   */
-  private calculateStats(task: ActiveTask): TaskStats {
-    return {
-      llmCalls: task.llmCalls,
-      toolCalls: task.toolCalls,
-      subagentSpawns: task.subagentSpawns,
-      totalInput: task.totalInput,
-      totalOutput: task.totalOutput,
-      totalTokens: task.totalInput + task.totalOutput,
-      estimatedCost: this.estimateCost(task.totalInput + task.totalOutput)
-    };
   }
 
   /**
