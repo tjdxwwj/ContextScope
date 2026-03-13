@@ -158,23 +158,29 @@ export class TaskTracker {
     task.endReason = reason;
     task.error = error;
     
-    // If this is a subagent task, link it to the parent task
+    // If this is a subagent task, link it to the parent task via SubagentLinks
     if (task.sessionKey && task.sessionKey.includes('subagent')) {
-      // Extract parent session from sessionKey or find parent via SubagentLinks
-      const allTasks = await this.storage.getRecentTasks(100);
-      const parentTask = allTasks.find(t => 
-        t.sessionKey === 'agent:main:main' && 
-        t.status === 'running' &&
-        t.startTime < task.startTime
-      );
-      
-      if (parentTask && !parentTask.childTaskIds?.includes(task.taskId)) {
-        if (!parentTask.childTaskIds) {
-          parentTask.childTaskIds = [];
+      try {
+        // Query SubagentLinks to find the parent
+        const allLinks = await this.storage.getSubagentLinks({});
+        const link = allLinks.find(l => l.childSessionKey === task.sessionKey);
+        
+        if (link && link.parentSessionId) {
+          // Find parent task by parentSessionId
+          const parentTask = await this.storage.getTaskBySessionId(link.parentSessionId);
+          
+          if (parentTask && !parentTask.childTaskIds?.includes(task.taskId)) {
+            if (!parentTask.childTaskIds) {
+              parentTask.childTaskIds = [];
+            }
+            parentTask.childTaskIds.push(task.taskId);
+            parentTask.stats.subagentSpawns = (parentTask.stats.subagentSpawns || 0) + 1;
+            await this.storage.captureTask(parentTask);
+            this.logDebug?.(`Linked child task ${task.taskId} to parent ${parentTask.taskId} via SubagentLink`);
+          }
         }
-        parentTask.childTaskIds.push(task.taskId);
-        await this.storage.captureTask(parentTask);
-        this.logDebug?.(`Linked child task ${task.taskId} to parent ${parentTask.taskId}`);
+      } catch (linkError) {
+        this.logWarn?.(`Failed to link subagent via SubagentLinks: ${linkError}`);
       }
     }
     
