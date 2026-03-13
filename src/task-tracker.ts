@@ -126,8 +126,10 @@ export class TaskTracker {
 
   /**
    * Record subagent spawn
+   * Note: This updates the parent task's subagent count
    */
-  async recordSubagentSpawn(sessionId: string): Promise<void> {
+  async recordSubagentSpawn(sessionId: string, childSessionKey?: string): Promise<void> {
+    // Query for the task with this sessionId (could be parent or child)
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (task) {
       task.stats.subagentSpawns++;
@@ -155,6 +157,26 @@ export class TaskTracker {
     task.status = this.mapReasonToStatus(reason);
     task.endReason = reason;
     task.error = error;
+    
+    // If this is a subagent task, link it to the parent task
+    if (task.sessionKey && task.sessionKey.includes('subagent')) {
+      // Extract parent session from sessionKey or find parent via SubagentLinks
+      const allTasks = await this.storage.getRecentTasks(100);
+      const parentTask = allTasks.find(t => 
+        t.sessionKey === 'agent:main:main' && 
+        t.status === 'running' &&
+        t.startTime < task.startTime
+      );
+      
+      if (parentTask && !parentTask.childTaskIds?.includes(task.taskId)) {
+        if (!parentTask.childTaskIds) {
+          parentTask.childTaskIds = [];
+        }
+        parentTask.childTaskIds.push(task.taskId);
+        await this.storage.captureTask(parentTask);
+        this.logDebug?.(`Linked child task ${task.taskId} to parent ${parentTask.taskId}`);
+      }
+    }
     
     // Persist update
     await this.storage.captureTask(task);

@@ -240,30 +240,29 @@ const plugin = {
         }
 
         if (event.toolName === 'sessions_spawn') {
+          // 解析子任务信息
+          const spawnDetails = event.result && typeof event.result === 'object' ? ((event.result as any).details ?? event.result) : undefined;
+          const childSessionKeyForSpawn = typeof spawnDetails?.childSessionKey === 'string' ? spawnDetails.childSessionKey.trim() : undefined;
+          
           // 记录子任务生成到任务
-          await taskTracker.recordSubagentSpawn(ctx.sessionId as string);
+          await taskTracker.recordSubagentSpawn(ctx.sessionId as string, childSessionKeyForSpawn);
+          
           const parentRunId = runId;
           if (!parentRunId) {
             return;
           }
 
-          const details =
-            event.result && typeof event.result === 'object'
-              ? ((event.result as any).details ?? event.result)
-              : undefined;
-
-          const childRunId = typeof details?.runId === 'string' ? details.runId.trim() : '';
+          const childRunId = typeof spawnDetails?.runId === 'string' ? spawnDetails.runId.trim() : '';
           if (!childRunId) {
             return;
           }
 
-          const childSessionKey =
-            typeof details?.childSessionKey === 'string' ? details.childSessionKey.trim() : undefined;
+          const childSessionKey = typeof spawnDetails?.childSessionKey === 'string' ? spawnDetails.childSessionKey.trim() : undefined;
           const runtimeParam =
             typeof event.params?.runtime === 'string' ? event.params.runtime.trim() : '';
           const runtime = runtimeParam === 'acp' || runtimeParam === 'subagent' ? runtimeParam : undefined;
-          const mode = details?.mode === 'run' || details?.mode === 'session' ? details.mode : undefined;
-          const label = typeof details?.label === 'string' ? details.label.trim() : undefined;
+          const mode = spawnDetails?.mode === 'run' || spawnDetails?.mode === 'session' ? spawnDetails.mode : undefined;
+          const label = typeof spawnDetails?.label === 'string' ? spawnDetails.label.trim() : undefined;
 
           await service.captureSubagentLink({
             kind: 'spawn',
