@@ -18,6 +18,8 @@ import {
   MousePointer2,
   Calendar,
   Trash2,
+  DollarSign,
+  RefreshCw,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import { message, Modal } from 'antd'
@@ -25,14 +27,14 @@ import * as d3 from 'd3'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { ContextDistribution } from './components/ContextDistribution'
+import { PricingTable } from './components/PricingTable'
+import { PricingInfo } from './components/PricingInfo'
 import { loadLocalStore, loadRealTimeData } from './data/loadData'
 import {
   fetchChain,
-  fetchTaskTree,
   fetchTasks,
   type ChainResponse,
   type TaskData,
-  type TaskTreeNode,
 } from './data/apiClient'
 import {
   buildRunTree,
@@ -103,6 +105,164 @@ const formatDuration = (durationMs?: number) => {
   const minutes = Math.floor(seconds / 60)
   if (minutes > 0) return `${minutes}m ${seconds % 60}s`
   return `${seconds}s`
+}
+
+// 从 pricing 工具导入（动态从 API 获取，无硬编码）
+import { calculateCost, formatCost, ensurePricingLoaded, getPricingStatus } from './utils/pricing'
+
+const extractUserTaskFromPrompt = (raw: string): string => {
+  if (!raw) return ''
+  const noCodeFence = raw.replace(/```[\s\S]*?```/g, '\n')
+  const noMetadataSections = noCodeFence
+    .replace(/^\s*System:.*$/gim, '')
+    .replace(/^\s*Conversation info.*$/gim, '')
+    .replace(/^\s*Sender \(untrusted metadata\):.*$/gim, '')
+    .replace(/^\s*Sender:.*$/gim, '')
+  const lines = noMetadataSections
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        !line.startsWith('{') &&
+        !line.startsWith('}') &&
+        !line.startsWith('"') &&
+        !line.startsWith('[') &&
+        !line.startsWith(']')
+    )
+  if (lines.length === 0) return raw.trim()
+  return lines[lines.length - 1]
+}
+const normalizeLlmOutput = (value: unknown): string => {
+  if (value == null) return ''
+  if (typeof value === 'string') return value.trim()
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+const extractLlmOutputFromChain = (chainData: ChainResponse): string => {
+  const items = [...chainData.chain].sort((a, b) => b.timestamp - a.timestamp)
+  for (const item of items) {
+    if (item.type !== 'output') continue
+    const text = item.output?.text?.trim()
+    if (text) return text
+    const assistantTexts = (item.output?.assistantTexts ?? [])
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .join('\n')
+    if (assistantTexts) return assistantTexts
+    const result = normalizeLlmOutput(item.output?.result)
+    if (result) return result
+    const outcome = item.output?.outcome?.trim()
+    if (outcome) return outcome
+  }
+  return ''
+}
+const buildRunTreeSignature = (tree: RunTreeNode[]): string =>
+  tree
+    .map((node) => `${node.runId}:${node.startTime}:${node.endTime}:${node.children.length}:${node.requestCount}`)
+    .join('|')
+interface TaskMenuNode {
+  taskId: string
+  children: TaskMenuNode[]
+}
+
+const deriveTaskMenuData = (tasks: TaskData[], roots: RunTreeNode[]) => {
+  const taskMap = new Map(tasks.map((task) => [task.taskId, task]))
+  const childrenByParent = new Map<string, string[]>()
+  const parentByChild = new Map<string, string>()
+  const runParentMap = new Map<string, string>()
+  const walkRuns = (node: RunTreeNode, parentRunId?: string) => {
+    if (parentRunId) runParentMap.set(node.runId, parentRunId)
+    node.children.forEach((child) => walkRuns(child, node.runId))
+  }
+  roots.forEach((rootNode) => walkRuns(rootNode))
+
+  const linkParentChild = (parentId: string, childId: string) => {
+    if (!taskMap.has(parentId) || !taskMap.has(childId) || parentId === childId) return
+    const existingParentId = parentByChild.get(childId)
+    if (existingParentId && existingParentId !== parentId) return
+    if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, [])
+    const list = childrenByParent.get(parentId)!
+    if (!list.includes(childId)) list.push(childId)
+    if (!parentByChild.has(childId)) parentByChild.set(childId, parentId)
+  }
+
+  tasks.forEach((parentTask) => {
+    ;(parentTask.childTaskIds ?? []).forEach((childId) => {
+      linkParentChild(parentTask.taskId, childId)
+    })
+  })
+
+  tasks.forEach((task) => {
+    if (task.parentTaskId) linkParentChild(task.parentTaskId, task.taskId)
+  })
+
+  const runToTaskId = new Map<string, string>()
+  tasks.forEach((task) => {
+    task.runIds.forEach((runId) => {
+      if (!runToTaskId.has(runId)) runToTaskId.set(runId, task.taskId)
+    })
+  })
+
+  tasks.forEach((task) => {
+    if (parentByChild.has(task.taskId)) return
+    for (const runId of task.runIds) {
+      const parentRunId = runParentMap.get(runId)
+      if (!parentRunId) continue
+      const parentTaskId = runToTaskId.get(parentRunId)
+      if (parentTaskId) {
+        linkParentChild(parentTaskId, task.taskId)
+        break
+      }
+    }
+  })
+
+  const tasksBySession = new Map<string, TaskData[]>()
+  tasks.forEach((task) => {
+    if (!tasksBySession.has(task.sessionId)) tasksBySession.set(task.sessionId, [])
+    tasksBySession.get(task.sessionId)!.push(task)
+  })
+  tasksBySession.forEach((list) => list.sort((a, b) => a.startTime - b.startTime))
+  tasks.forEach((task) => {
+    if (parentByChild.has(task.taskId) || !task.parentSessionId) return
+    const candidateParents = (tasksBySession.get(task.parentSessionId) ?? []).filter(
+      (candidate) => candidate.taskId !== task.taskId && candidate.startTime <= task.startTime
+    )
+    const parentTask = candidateParents.length > 0
+      ? candidateParents[candidateParents.length - 1]
+      : (tasksBySession.get(task.parentSessionId) ?? []).find((candidate) => candidate.taskId !== task.taskId)
+    if (parentTask) linkParentChild(parentTask.taskId, task.taskId)
+  })
+
+  const allTaskIds = tasks.map((task) => task.taskId)
+  const rootTaskIds = allTaskIds.filter((taskId) => !parentByChild.has(taskId))
+  const effectiveRootTaskIds = rootTaskIds.length > 0 ? rootTaskIds : allTaskIds
+
+  const buildMenuNode = (taskId: string, visited: Set<string>): TaskMenuNode => {
+    if (visited.has(taskId)) return { taskId, children: [] }
+    visited.add(taskId)
+    const children = (childrenByParent.get(taskId) ?? [])
+      .slice()
+      .sort((a, b) => (taskMap.get(a)?.startTime ?? 0) - (taskMap.get(b)?.startTime ?? 0))
+      .map((childId) => buildMenuNode(childId, visited))
+    return { taskId, children }
+  }
+
+  const globalVisited = new Set<string>()
+  const rootNodes = effectiveRootTaskIds
+    .slice()
+    .sort((a, b) => (taskMap.get(b)?.startTime ?? 0) - (taskMap.get(a)?.startTime ?? 0))
+    .filter((taskId) => !globalVisited.has(taskId))
+    .map((taskId) => buildMenuNode(taskId, globalVisited))
+
+  return {
+    rootNodes,
+    rootTaskIds: effectiveRootTaskIds,
+    taskById: taskMap,
+  }
 }
 
 // --- StatusBadge (from ui) ---
@@ -240,27 +400,59 @@ const RunListItem = ({
         </div>
 
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3 text-[10px] font-medium">
-            <div className="flex flex-col">
-              <span className="text-slate-400 uppercase text-[8px]">In</span>
-              <span className="text-slate-600">
-                {node.usage.input.toLocaleString()}
-              </span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-slate-400 uppercase text-[8px]">Out</span>
-              <span className="text-slate-600">
-                {node.usage.output.toLocaleString()}
-              </span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-slate-400 uppercase text-[8px]">Total</span>
-              <span className="text-slate-900">
-                {node.usageEstimated ? '≈' : ''}
-                {node.usage.total.toLocaleString()}
-              </span>
-            </div>
-          </div>
+          {(() => {
+            const inputResult = calculateCost(node.model || '', node.usage.input, 0)
+            const outputResult = calculateCost(node.model || '', 0, node.usage.output)
+            const totalResult = calculateCost(node.model || '', node.usage.input, node.usage.output)
+            
+            return (
+              <div className="flex items-center gap-3 text-[10px] font-medium">
+                <div className="flex flex-col">
+                  <span className="text-slate-400 uppercase text-[8px]">In</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">
+                      {node.usage.input.toLocaleString()}
+                    </span>
+                    <span className={cn(
+                      "text-[8px] font-mono",
+                      !pricingLoaded ? "text-slate-400" : inputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                    )}>
+                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (inputResult.matched ? formatCost(inputResult.cost) : '未匹配')}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-slate-400 uppercase text-[8px]">Out</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">
+                      {node.usage.output.toLocaleString()}
+                    </span>
+                    <span className={cn(
+                      "text-[8px] font-mono",
+                      !pricingLoaded ? "text-slate-400" : outputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                    )}>
+                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (outputResult.matched ? formatCost(outputResult.cost) : '未匹配')}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-slate-400 uppercase text-[8px]">Total</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-900">
+                      {node.usageEstimated ? '≈' : ''}
+                      {node.usage.total.toLocaleString()}
+                    </span>
+                    <span className={cn(
+                      "text-[8px] font-mono font-bold",
+                      !pricingLoaded ? "text-slate-400" : totalResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                    )}>
+                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (totalResult.matched ? formatCost(totalResult.cost) : '未匹配')}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
           {node.children.length > 0 && (
             <span className="text-[10px] text-blue-500 font-medium italic">
               +{node.children.length} sub-runs
@@ -549,18 +741,57 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
                 />
               </div>
               
-              <div className="flex justify-between text-[10px]">
-                <div className="flex items-center gap-1.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
-                  <span className="text-slate-400">In</span>
-                  <span className="font-mono text-slate-300">{hovered.input.toLocaleString()}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  <span className="text-slate-400">Out</span>
-                  <span className="font-mono text-slate-300">{hovered.output.toLocaleString()}</span>
-                </div>
-              </div>
+              {(() => {
+                const inputResult = calculateCost(hovered.model || '', hovered.input, 0)
+                const outputResult = calculateCost(hovered.model || '', 0, hovered.output)
+                const totalResult = calculateCost(hovered.model || '', hovered.input, hovered.output)
+                
+                return (
+                  <>
+                    <div className="flex justify-between text-[10px]">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                        <span className="text-slate-400">In</span>
+                        <div className="flex items-center gap-1">
+                          <span className="font-mono text-slate-300">{hovered.input.toLocaleString()}</span>
+                          <span className={cn(
+                            "font-mono text-[9px]",
+                            inputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
+                          )}>
+                            {inputResult.matched ? formatCost(inputResult.cost) : '未匹配'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        <span className="text-slate-400">Out</span>
+                        <div className="flex items-center gap-1">
+                          <span className="font-mono text-slate-300">{hovered.output.toLocaleString()}</span>
+                          <span className={cn(
+                            "font-mono text-[9px]",
+                            outputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
+                          )}>
+                            {outputResult.matched ? formatCost(outputResult.cost) : '未匹配'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Total Cost Display */}
+                    <div className="pt-2 mt-2 border-t border-white/10">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-slate-400">Total Cost</span>
+                        <span className={cn(
+                          "font-bold font-mono",
+                          totalResult.matched ? "text-emerald-400" : "text-slate-500 italic"
+                        )}>
+                          {totalResult.matched ? formatCost(totalResult.cost) : '未匹配'}
+                        </span>
+                      </div>
+                    </div>
+                  </>
+                )
+              })()}
             </div>
 
             {hovered.selfValue != null && hovered.selfValue < hovered.value && (
@@ -576,8 +807,8 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
   )
 }
 
-// --- GitGraph 执行流：父 → 子 → 工具 → 回子 → 回父 → 完成 ---
-type GraphNodeKind = 'agent' | 'subagent' | 'tool' | 'merge' | 'done'
+// --- GitGraph 执行流：树形展示任务内调用链（含工具与子代理） ---
+type GraphNodeKind = 'agent' | 'subagent' | 'tool'
 
 interface GraphNode {
   id: string
@@ -598,111 +829,48 @@ interface GraphNode {
 interface GraphEdge {
   from: GraphNode
   to: GraphNode
-  type: 'branch' | 'merge'
+  type: 'branch'
   label?: string
 }
 
-// Git 式布局：主干在左 (lane 0)，所有 subagent 分支在相同阶段纵向对齐，体现“并行”
+// 树形布局：lane 表示深度，row 表示遍历顺序，包含 run + tool + 子 run 全节点
 function buildGitGraph(node: RunTreeNode): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const nodes: GraphNode[] = []
   const edges: GraphEdge[] = []
-  const TRUNK_LANE = 0
-
-  // 父 run：阶段 0，主干泳道
-  const parent: GraphNode = {
-    id: node.runId,
-    label: node.runId.substring(0, 8),
-    kind: (node.sessionKey ?? '').includes('subagent') ? 'subagent' : 'agent',
-    row: 0,
-    lane: TRUNK_LANE,
-    runId: node.runId,
-    usage: node.usage,
-    status: node.status,
-    fullData: node,
-  }
-  nodes.push(parent)
-
-  // 没有子 run，则直接结束
-  if (node.children.length === 0) {
-    const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row: 1, lane: TRUNK_LANE }
-    nodes.push(done)
-    edges.push({ from: parent, to: done, type: 'merge' })
-    return { nodes, edges }
-  }
-
-  const maxToolCount =
-    node.children.length === 0
-      ? 0
-      : Math.max(...node.children.map((c) => c.toolCalls.length))
-
-  // 阶段设计：
-  // row 0: 父 run
-  // row 1: 所有子 run（并行）
-  // row 2..(1+maxToolCount): 第 i 个工具调用阶段（各子在自己泳道并行）
-  // row (2+maxToolCount): 子 run 合并回父
-  // row (3+maxToolCount): 父 run 完成
-
-  const CHILD_ROW = 1
-  const TOOL_BASE_ROW = 2
-  const MERGE_CHILD_ROW = TOOL_BASE_ROW + maxToolCount
-  const DONE_ROW = MERGE_CHILD_ROW + 1
-
-  let branchLane = 1
-  const mergeNodes: GraphNode[] = []
-
-  for (const child of node.children) {
-    const lane = branchLane++
-
-    // 子 run 节点：并行阶段
-    const childNode: GraphNode = {
-      id: child.runId,
-      label: child.runId.substring(0, 8),
-      kind: 'subagent',
-      row: CHILD_ROW,
-      lane,
-      runId: child.runId,
-      usage: child.usage,
-      status: child.status,
-      fullData: child,
+  let row = 0
+  const walk = (run: RunTreeNode, depth: number, parent?: GraphNode) => {
+    const runNode: GraphNode = {
+      id: `run-${run.runId}`,
+      label: run.runId.substring(0, 8),
+      kind: (run.sessionKey ?? '').includes('subagent') || depth > 0 ? 'subagent' : 'agent',
+      row: row++,
+      lane: depth,
+      runId: run.runId,
+      usage: run.usage,
+      status: run.status,
+      fullData: run,
     }
-    nodes.push(childNode)
-    edges.push({ from: parent, to: childNode, type: 'branch' })
+    nodes.push(runNode)
+    if (parent) edges.push({ from: parent, to: runNode, type: 'branch' })
 
-    // 工具调用阶段：每个工具落在对应阶段 row，所有子在同一阶段并行
-    let prevOnBranch: GraphNode = childNode
-    child.toolCalls.forEach((tool, idx) => {
-      const toolRow = TOOL_BASE_ROW + idx
+    run.toolCalls.forEach((tool, idx) => {
       const toolNode: GraphNode = {
-        id: tool.toolCallId ?? `tool-${child.runId}-${nodes.length}`,
+        id: tool.toolCallId ?? `tool-${run.runId}-${idx}`,
         label: tool.toolName,
         kind: 'tool',
-        row: toolRow,
-        lane,
+        row: row++,
+        lane: depth + 1,
         toolName: tool.toolName,
         durationMs: tool.durationMs,
       }
       nodes.push(toolNode)
-      edges.push({ from: prevOnBranch, to: toolNode, type: 'branch' })
-      prevOnBranch = toolNode
+      edges.push({ from: runNode, to: toolNode, type: 'branch' })
     })
 
-    // 每个子 run 的合并节点（与父主干的 merge 阶段对齐）
-    const mergeNode: GraphNode = {
-      id: `merge-${child.runId}`,
-      label: '↩',
-      kind: 'merge',
-      row: MERGE_CHILD_ROW,
-      lane: TRUNK_LANE,
-    }
-    nodes.push(mergeNode)
-    edges.push({ from: prevOnBranch, to: mergeNode, type: 'merge' })
-    mergeNodes.push(mergeNode)
+    run.children.forEach((child) => walk(child, depth + 1, runNode))
   }
 
-  // 所有合并节点再连接到最终完成节点
-  const done: GraphNode = { id: 'done', label: '完成', kind: 'done', row: DONE_ROW, lane: TRUNK_LANE }
-  nodes.push(done)
-  mergeNodes.forEach((m) => edges.push({ from: m, to: done, type: 'merge' }))
+  walk(node, 0)
   return { nodes, edges }
 }
 
@@ -737,23 +905,6 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
       agent: '#0ea5e9',
       subagent: '#8b5cf6',
       tool: '#f59e0b',
-      merge: '#64748b',
-      done: '#10b981',
-    }
-
-    const trunkNodes = nodes.filter((n) => n.lane === 0).sort((a, b) => a.row - b.row)
-    for (let i = 0; i < trunkNodes.length - 1; i++) {
-      const a = trunkNodes[i]
-      const b = trunkNodes[i + 1]
-      const y1 = yScale(a.row)
-      const y2 = yScale(b.row)
-      g.append('line')
-        .attr('x1', xScale(0))
-        .attr('y1', y1)
-        .attr('x2', xScale(0))
-        .attr('y2', y2)
-        .attr('stroke', '#94a3b8')
-        .attr('stroke-width', 2)
     }
 
     edges.forEach((e) => {
@@ -762,27 +913,19 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
       const x2 = xScale(e.to.lane)
       const y2 = yScale(e.to.row)
       const midY = (y1 + y2) / 2
-      const pts: [number, number][] =
-        e.type === 'branch'
-          ? [
-              [x1, y1],
-              [x1, midY],
-              [x2, midY],
-              [x2, y2],
-            ]
-          : [
-              [x1, y1],
-              [x1, midY],
-              [x2, midY],
-              [x2, y2],
-            ]
+      const pts: [number, number][] = [
+        [x1, y1],
+        [x1, midY],
+        [x2, midY],
+        [x2, y2],
+      ]
       const line = d3.line<[number, number]>().curve(d3.curveBasis)
       g.append('path')
         .attr('d', line(pts))
         .attr('fill', 'none')
-        .attr('stroke', e.type === 'branch' ? '#94a3b8' : '#cbd5e1')
+        .attr('stroke', '#94a3b8')
         .attr('stroke-width', 2)
-        .attr('stroke-dasharray', e.type === 'merge' ? '4 3' : '0')
+        .attr('stroke-dasharray', '0')
         .attr('opacity', 0.9)
     })
 
@@ -798,14 +941,13 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
 
     nodeGroups
       .append('circle')
-      .attr('r', (d) => (d.kind === 'merge' ? 5 : NODE_R))
+      .attr('r', NODE_R)
       .attr('fill', (d) => colors[d.kind])
       .attr('stroke', '#fff')
       .attr('stroke-width', 2)
       .attr('class', 'cursor-pointer')
 
     nodeGroups
-      .filter((d) => d.kind !== 'merge')
       .append('text')
       .attr('x', NODE_R + 8)
       .attr('y', 4)
@@ -816,7 +958,7 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
       .text((d) => d.label)
 
     nodeGroups
-      .filter((d) => d.kind !== 'merge' && d.kind !== 'done')
+      .filter((d) => d.kind !== 'tool')
       .append('text')
       .attr('x', NODE_R + 8)
       .attr('y', 18)
@@ -835,10 +977,10 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
       <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
         <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
           <GitBranch className="w-4 h-4 text-purple-500" />
-          GitGraph 执行流 (分支与合并)
+          调用链视图（树形）
         </h3>
         <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
-          Git 式主干 · 分支合并
+          用户任务 · 子代理 · 工具节点
         </span>
       </div>
       <div className="overflow-y-auto overflow-x-auto p-4 bg-slate-50/20 min-h-[240px] max-h-[720px]">
@@ -865,26 +1007,66 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
             </p>
             {hoveredNode.usage && (
               <div className="space-y-2">
-                <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
-                  <span className="text-[8px] text-slate-400 uppercase">Input</span>
-                  <span className="text-xs font-bold mono">
-                    {hoveredNode.usage.input.toLocaleString()}
-                  </span>
-                </div>
-                <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
-                  <span className="text-[8px] text-slate-400 uppercase">Output</span>
-                  <span className="text-xs font-bold mono">
-                    {hoveredNode.usage.output.toLocaleString()}
-                  </span>
-                </div>
-                <div className="bg-emerald-500/10 p-2 rounded-lg flex justify-between items-center border border-emerald-500/20">
-                  <span className="text-[8px] text-emerald-400 uppercase font-bold">
-                    Total Tokens
-                  </span>
-                  <span className="text-xs font-bold mono text-emerald-400">
-                    {hoveredNode.usage.total.toLocaleString()}
-                  </span>
-                </div>
+                {(() => {
+                  const model = hoveredNode.fullData?.model || ''
+                  const inputResult = calculateCost(model, hoveredNode.usage.input, 0)
+                  const outputResult = calculateCost(model, 0, hoveredNode.usage.output)
+                  const totalResult = calculateCost(model, hoveredNode.usage.input, hoveredNode.usage.output)
+                  
+                  return (
+                    <>
+                      <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
+                        <div>
+                          <span className="text-[8px] text-slate-400 uppercase block">Input</span>
+                          <span className="text-xs font-bold mono text-white">
+                            {hoveredNode.usage.input.toLocaleString()}
+                          </span>
+                        </div>
+                        <span className={cn(
+                          "text-xs font-bold mono",
+                          inputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
+                        )}>
+                          {inputResult.matched ? formatCost(inputResult.cost) : '未匹配'}
+                        </span>
+                      </div>
+                      <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
+                        <div>
+                          <span className="text-[8px] text-slate-400 uppercase block">Output</span>
+                          <span className="text-xs font-bold mono text-white">
+                            {hoveredNode.usage.output.toLocaleString()}
+                          </span>
+                        </div>
+                        <span className={cn(
+                          "text-xs font-bold mono",
+                          outputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
+                        )}>
+                          {outputResult.matched ? formatCost(outputResult.cost) : '未匹配'}
+                        </span>
+                      </div>
+                      <div className="bg-emerald-500/10 p-2 rounded-lg flex justify-between items-center border border-emerald-500/20">
+                        <div>
+                          <span className="text-[8px] text-emerald-400 uppercase font-bold block">
+                            Total Tokens
+                          </span>
+                          <span className="text-xs font-bold mono text-emerald-300">
+                            {hoveredNode.usage.total.toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="bg-emerald-500/20 p-2 rounded-lg flex justify-between items-center border border-emerald-500/30">
+                        <span className="text-[8px] text-emerald-300 uppercase font-bold">
+                          Total Cost
+                        </span>
+                        <span className={cn(
+                          "text-xs font-bold mono",
+                          totalResult.matched ? "text-emerald-300" : "text-slate-500 italic"
+                        )}>
+                          {totalResult.matched ? formatCost(totalResult.cost) : '未匹配'}
+                        </span>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
             )}
             {hoveredNode.durationMs != null && (
@@ -1102,20 +1284,86 @@ const GlobalOverview = ({
             交互式分析 Session 内的所有并发与顺序调用
           </p>
         </div>
-        <div className="flex gap-4">
-          <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
-            <p className="text-[10px] text-slate-400 font-bold uppercase">总 Token</p>
-            <p className="text-lg font-bold text-blue-600 mono">
-              {totalTokens.toLocaleString()}
-            </p>
-          </div>
-          <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
-            <p className="text-[10px] text-slate-400 font-bold uppercase">总工具调用</p>
-            <p className="text-lg font-bold text-amber-600 mono">
-              {totalCalls.toLocaleString()}
-            </p>
-          </div>
-        </div>
+        {(() => {
+          const totalInputTokens = runs.reduce((sum, r) => sum + r.usage.input, 0)
+          const totalOutputTokens = runs.reduce((sum, r) => sum + r.usage.output, 0)
+          const totalInputResult = runs.reduce((acc, r) => {
+            const result = calculateCost(r.model || '', r.usage.input, 0)
+            return {
+              cost: acc.cost + result.cost,
+              matched: acc.matched || result.matched
+            }
+          }, { cost: 0, matched: false })
+          const totalOutputResult = runs.reduce((acc, r) => {
+            const result = calculateCost(r.model || '', 0, r.usage.output)
+            return {
+              cost: acc.cost + result.cost,
+              matched: acc.matched || result.matched
+            }
+          }, { cost: 0, matched: false })
+          const totalResult = runs.reduce((acc, r) => {
+            const result = calculateCost(r.model || '', r.usage.input, r.usage.output)
+            return {
+              cost: acc.cost + result.cost,
+              matched: acc.matched || result.matched
+            }
+          }, { cost: 0, matched: false })
+          
+          const allMatched = runs.every(r => calculateCost(r.model || '', r.usage.input, r.usage.output).matched)
+          
+          return (
+            <div className="flex gap-4">
+              <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Input</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-lg font-bold text-blue-600 mono">
+                    {totalInputTokens.toLocaleString()}
+                  </p>
+                  <p className={cn(
+                    "text-[10px] font-bold mono",
+                    allMatched ? "text-emerald-600" : "text-slate-400 italic"
+                  )}>
+                    {allMatched ? formatCost(totalInputResult.cost) : '部分未匹配'}
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Output</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-lg font-bold text-emerald-600 mono">
+                    {totalOutputTokens.toLocaleString()}
+                  </p>
+                  <p className={cn(
+                    "text-[10px] font-bold mono",
+                    allMatched ? "text-emerald-600" : "text-slate-400 italic"
+                  )}>
+                    {allMatched ? formatCost(totalOutputResult.cost) : '部分未匹配'}
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Total</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-lg font-bold text-slate-900 mono">
+                    {totalTokens.toLocaleString()}
+                  </p>
+                  <p className={cn(
+                    "text-[10px] font-bold mono",
+                    allMatched ? "text-emerald-600" : "text-slate-400 italic"
+                  )}>
+                    {allMatched ? formatCost(totalResult.cost) : '部分未匹配'}
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-[10px] text-slate-400 font-bold uppercase">工具调用</p>
+                <p className="text-lg font-bold text-amber-600 mono">
+                  {totalCalls.toLocaleString()}
+                </p>
+              </div>
+            </div>
+          )
+        })()}
       </div>
 
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
@@ -1267,22 +1515,35 @@ const GlobalOverview = ({
 
 export default function App() {
   const [roots, setRoots] = useState<RunTreeNode[]>([])
+  const rootsSignatureRef = useRef('')
   const [tasks, setTasks] = useState<TaskData[]>([])
   const [selectedRun, setSelectedRun] = useState<RunTreeNode | null>(null)
   const selectedRunRef = useRef<RunTreeNode | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-  const [selectedTaskTree, setSelectedTaskTree] = useState<TaskTreeNode | null>(null)
-  const [taskTreeLoading, setTaskTreeLoading] = useState(false)
+  const [selectedTaskUserPrompt, setSelectedTaskUserPrompt] = useState<string | null>(null)
+  const [selectedTaskLlmOutput, setSelectedTaskLlmOutput] = useState<string | null>(null)
+  const [taskPromptLoading, setTaskPromptLoading] = useState(false)
   const [leftPanelMode, setLeftPanelMode] = useState<'run' | 'task'>('task')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'overview' | 'run'>('run')
-  const [activeTab, setActiveTab] = useState<'details' | 'tree'>('details')
-  const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap'>('timeline')
+  const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap' | 'pricing'>('timeline')
   const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>({})
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [isClearingCache, setIsClearingCache] = useState(false)
   const [selectedRunChainToolCalls, setSelectedRunChainToolCalls] = useState<ToolCallSummary[] | null>(null)
+  
+  // 价格加载状态
+  const [pricingLoaded, setPricingLoaded] = useState(false)
+  
+  useEffect(() => {
+    const loadPricing = async () => {
+      await ensurePricingLoaded()
+      const status = getPricingStatus()
+      setPricingLoaded(status.loaded)
+    }
+    loadPricing()
+  }, [])
 
   const handleLocate = useCallback((runId: string) => {
     logRunListDebug('locate-run-requested', {
@@ -1297,7 +1558,6 @@ export default function App() {
       })
       setSelectedRun(node)
       setViewMode('run')
-      setActiveTab('details')
       setTimeout(() => {
         const el = document.getElementById(`run-item-${runId}`)
         if (el) {
@@ -1313,39 +1573,119 @@ export default function App() {
     selectedRunRef.current = selectedRun
   }, [selectedRun])
 
+  const taskMenuData = useMemo(() => deriveTaskMenuData(tasks, roots), [tasks, roots])
   const selectedTask = useMemo(
-    () => tasks.find((task) => task.taskId === selectedTaskId) ?? null,
-    [tasks, selectedTaskId]
+    () => (selectedTaskId ? taskMenuData.taskById.get(selectedTaskId) ?? null : null),
+    [selectedTaskId, taskMenuData]
   )
   const selectedTaskWorkflowRun = useMemo(() => {
     if (!selectedTask) return null
-    for (const runId of selectedTask.runIds) {
-      const runNode = findRunInTree(roots, runId)
-      if (runNode) return runNode
+    const runNodes = selectedTask.runIds
+      .map((runId) => findRunInTree(roots, runId))
+      .filter((runNode): runNode is RunTreeNode => runNode != null)
+    if (runNodes.length === 0) return null
+
+    const runIdSet = new Set(runNodes.map((runNode) => runNode.runId))
+    const childIdSet = new Set<string>()
+    runNodes.forEach((runNode) => {
+      runNode.children.forEach((child) => {
+        if (runIdSet.has(child.runId)) childIdSet.add(child.runId)
+      })
+    })
+    const rootRuns = runNodes.filter((runNode) => !childIdSet.has(runNode.runId))
+    const workflowRoots = rootRuns.length > 0 ? rootRuns : runNodes
+    if (workflowRoots.length === 1) return workflowRoots[0]
+
+    const usage = workflowRoots.reduce(
+      (acc, runNode) => ({
+        input: acc.input + runNode.usage.input,
+        output: acc.output + runNode.usage.output,
+        total: acc.total + runNode.usage.total,
+      }),
+      { input: 0, output: 0, total: 0 }
+    )
+    const hasError = workflowRoots.some((runNode) => runNode.status === 'error')
+    const hasRunning = workflowRoots.some((runNode) => runNode.status === 'running')
+    const isAllSuccess = workflowRoots.every((runNode) => runNode.status === 'success')
+    const status: RunTreeNode['status'] = hasError
+      ? 'error'
+      : hasRunning
+        ? 'running'
+        : isAllSuccess
+          ? 'success'
+          : 'unknown'
+    return {
+      runId: selectedTask.taskId,
+      sessionId: selectedTask.sessionId,
+      sessionKey: selectedTask.sessionKey,
+      startTime: Math.min(...workflowRoots.map((runNode) => runNode.startTime)),
+      endTime: Math.max(...workflowRoots.map((runNode) => runNode.endTime)),
+      usage,
+      requestCount: workflowRoots.reduce((sum, runNode) => sum + runNode.requestCount, 0),
+      status,
+      children: workflowRoots,
+      toolCalls: [],
     }
-    return null
   }, [selectedTask, roots])
 
   useEffect(() => {
     let canceled = false
-    if (!selectedTaskId) {
-      setSelectedTaskTree(null)
-      setTaskTreeLoading(false)
+    if (!selectedTask || selectedTask.runIds.length === 0) {
+      setSelectedTaskUserPrompt(null)
+      setSelectedTaskLlmOutput(null)
+      setTaskPromptLoading(false)
       return
     }
-    setTaskTreeLoading(true)
-    fetchTaskTree(selectedTaskId)
-      .then((tree) => {
-        if (canceled) return
-        setSelectedTaskTree(tree)
-      })
-      .finally(() => {
-        if (!canceled) setTaskTreeLoading(false)
-      })
+
+    const runCandidates = [...selectedTask.runIds]
+
+    setTaskPromptLoading(true)
+    setSelectedTaskUserPrompt(null)
+    setSelectedTaskLlmOutput(null)
+
+    ;(async () => {
+      let foundPrompt: string | null = null
+      let foundOutput: string | null = null
+      for (const runId of runCandidates) {
+        const chainData = await fetchChain(runId)
+        if (!chainData) continue
+        if (!foundPrompt) {
+          const promptItem = [...chainData.chain]
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .find(
+              (item) =>
+                item.type === 'input' &&
+                ((item.input?.prompt && item.input.prompt.trim().length > 0) ||
+                  (item.input?.task && item.input.task.trim().length > 0))
+            )
+          const promptText = promptItem?.input?.prompt?.trim() || promptItem?.input?.task?.trim()
+          if (promptText) foundPrompt = extractUserTaskFromPrompt(promptText)
+        }
+        if (!foundOutput) {
+          const outputText = extractLlmOutputFromChain(chainData)
+          if (outputText) foundOutput = outputText
+        }
+        if (foundPrompt && foundOutput) break
+      }
+      if (!canceled) setSelectedTaskUserPrompt(foundPrompt)
+      if (!canceled) setSelectedTaskLlmOutput(foundOutput)
+      if (!canceled) setTaskPromptLoading(false)
+    })()
+
     return () => {
       canceled = true
     }
-  }, [selectedTaskId])
+  }, [selectedTask])
+
+  useEffect(() => {
+    if (taskMenuData.rootTaskIds.length === 0) {
+      setSelectedTaskId(null)
+      return
+    }
+    setSelectedTaskId((prev) =>
+      prev && taskMenuData.taskById.has(prev) ? prev : taskMenuData.rootTaskIds[0]
+    )
+  }, [taskMenuData])
 
   useEffect(() => {
     let canceled = false
@@ -1375,13 +1715,6 @@ export default function App() {
       fetchTasks({ limit: 100 }),
     ])
     setTasks(latestTasks)
-    if (latestTasks.length > 0) {
-      setSelectedTaskId((prev) =>
-        prev && latestTasks.some((task) => task.taskId === prev) ? prev : latestTasks[0].taskId
-      )
-    } else {
-      setSelectedTaskId(null)
-    }
     if (!raw) {
       setLoadError(
         '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
@@ -1394,6 +1727,7 @@ export default function App() {
           rootsCount: tree.length,
           firstRunId: tree[0]?.runId ?? null,
         })
+      rootsSignatureRef.current = buildRunTreeSignature(tree)
       setRoots(tree)
       
       // Try to preserve selection
@@ -1427,6 +1761,9 @@ export default function App() {
         if (realTimeData && realTimeData.requests.length > 0) {
           console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
           const tree = buildRunTree(realTimeData)
+          const nextSignature = buildRunTreeSignature(tree)
+          if (nextSignature === rootsSignatureRef.current) return
+          rootsSignatureRef.current = nextSignature
           setRoots(tree)
           // 保持当前选中的 run（如果还存在）
           const currentSelectedRun = selectedRunRef.current
@@ -1508,9 +1845,56 @@ export default function App() {
       ? selectedRunChainToolCalls
       : (selectedRun?.toolCalls ?? [])
   const loadedCountLabel =
-    leftPanelMode === 'task' ? `${tasks.length} 个用户任务` : `${roots.length} 个大模型调用`
+    leftPanelMode === 'task'
+      ? `${taskMenuData.rootTaskIds.length} 个用户任务`
+      : `${roots.length} 个大模型调用`
   const inputRatio =
     totalTokens > 0 ? (selectedRun!.usage.input / totalTokens) * 100 : 0
+  const renderTaskMenuNode = (node: TaskMenuNode, depth: number = 0): JSX.Element | null => {
+    const task = taskMenuData.taskById.get(node.taskId)
+    if (!task) return null
+    return (
+      <div key={node.taskId}>
+        <div className={cn('px-4', depth > 0 && 'pl-7')}>
+          <button
+            type="button"
+            className={cn(
+              'w-full mb-2 p-3 text-left rounded-xl border transition-all',
+              selectedTaskId === task.taskId
+                ? 'bg-blue-50 border-blue-200'
+                : 'bg-white border-slate-200 hover:bg-slate-50'
+            )}
+            style={{ marginLeft: `${depth * 10}px` }}
+            onClick={() => setSelectedTaskId(task.taskId)}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="mono text-[11px] font-bold text-slate-700">
+                {task.taskId.substring(0, 12)}...
+              </span>
+              <span
+                className={cn(
+                  'px-2 py-0.5 text-[10px] font-semibold rounded-full border',
+                  taskStatusClass[task.status] || 'bg-slate-100 text-slate-700 border-slate-200'
+                )}
+              >
+                {taskStatusText[task.status] || task.status}
+              </span>
+            </div>
+            <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+              <span>{formatFullTime(task.startTime)}</span>
+              <span>
+                {(task.stats.totalTokens || 0).toLocaleString()} Token
+                {(node.children.length ?? 0) > 0
+                  ? ` · +${node.children.length} subAgents`
+                  : ''}
+              </span>
+            </div>
+          </button>
+        </div>
+        {node.children.map((childNode) => renderTaskMenuNode(childNode, depth + 1))}
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
@@ -1781,42 +2165,12 @@ export default function App() {
                     用户任务列表
                   </p>
                 </div>
-                {!loading && !loadError && tasks.length === 0 && (
+                {!loading && !loadError && taskMenuData.rootNodes.length === 0 && (
                   <div className="mx-4 p-4 text-slate-500 text-xs">
                     暂无用户任务
                   </div>
                 )}
-                {tasks.map((task) => (
-                  <button
-                    key={task.taskId}
-                    type="button"
-                    className={cn(
-                      'w-[calc(100%-2rem)] mx-4 mb-2 p-3 text-left rounded-xl border transition-all',
-                      selectedTaskId === task.taskId
-                        ? 'bg-blue-50 border-blue-200'
-                        : 'bg-white border-slate-200 hover:bg-slate-50'
-                    )}
-                    onClick={() => setSelectedTaskId(task.taskId)}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="mono text-[11px] font-bold text-slate-700">
-                        {task.taskId.substring(0, 12)}...
-                      </span>
-                      <span
-                        className={cn(
-                          'px-2 py-0.5 text-[10px] font-semibold rounded-full border',
-                          taskStatusClass[task.status] || 'bg-slate-100 text-slate-700 border-slate-200'
-                        )}
-                      >
-                        {taskStatusText[task.status] || task.status}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
-                      <span>{formatFullTime(task.startTime)}</span>
-                      <span>{(task.stats.totalTokens || 0).toLocaleString()} Token</span>
-                    </div>
-                  </button>
-                ))}
+                {taskMenuData.rootNodes.map((node) => renderTaskMenuNode(node))}
               </>
             )}
           </div>
@@ -1872,59 +2226,108 @@ export default function App() {
                       {taskStatusText[selectedTask.status] || selectedTask.status}
                     </span>
                   </div>
-                  <div className="grid grid-cols-4 gap-4">
-                    {[
-                      { label: 'Total Tokens', value: selectedTask.stats.totalTokens },
-                      { label: 'LLM Calls', value: selectedTask.stats.llmCalls },
-                      { label: 'Tool Calls', value: selectedTask.stats.toolCalls },
-                      { label: 'Subagents', value: selectedTask.stats.subagentSpawns },
-                    ].map((stat) => (
-                      <div
-                        key={stat.label}
-                        className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm"
-                      >
-                        <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
-                          {stat.label}
-                        </p>
-                        <p className="text-2xl font-bold text-slate-900 mono">
-                          {stat.value.toLocaleString()}
-                        </p>
+                  {(() => {
+                    const model = selectedTaskWorkflowRun?.model || ''
+                    const inputResult = calculateCost(model, selectedTask.stats.totalInput, 0)
+                    const outputResult = calculateCost(model, 0, selectedTask.stats.totalOutput)
+                    const totalResult = calculateCost(model, selectedTask.stats.totalInput, selectedTask.stats.totalOutput)
+                    
+                    return (
+                      <div className="grid grid-cols-5 gap-4">
+                        {[
+                          { 
+                            label: 'Input Tokens', 
+                            value: selectedTask.stats.totalInput.toLocaleString(),
+                            subValue: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
+                            matched: inputResult.matched,
+                            isCost: false 
+                          },
+                          { 
+                            label: 'Output Tokens', 
+                            value: selectedTask.stats.totalOutput.toLocaleString(),
+                            subValue: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
+                            matched: outputResult.matched,
+                            isCost: false 
+                          },
+                          { 
+                            label: 'Total Tokens', 
+                            value: selectedTask.stats.totalTokens.toLocaleString(),
+                            subValue: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
+                            matched: totalResult.matched,
+                            isCost: false 
+                          },
+                          { label: 'LLM Calls', value: selectedTask.stats.llmCalls.toLocaleString(), isCost: false },
+                          { 
+                            label: 'Total Cost', 
+                            value: totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配', 
+                            matched: totalResult.matched,
+                            isCost: true
+                          },
+                        ].map((stat) => (
+                          <div
+                            key={stat.label}
+                            className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm"
+                          >
+                            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
+                              {stat.label}
+                            </p>
+                            {stat.subValue ? (
+                              <>
+                                <p className="text-lg font-bold text-slate-900 mono">
+                                  {stat.value}
+                                </p>
+                                <p className={cn(
+                                  "text-[11px] font-bold mono mt-0.5",
+                                  stat.matched ? "text-emerald-600" : "text-slate-400 italic"
+                                )}>
+                                  {stat.subValue}
+                                </p>
+                              </>
+                            ) : (
+                              <p className={cn(
+                                "text-2xl font-bold mono",
+                                stat.isCost ? "text-emerald-600" : "text-slate-900"
+                              )}>
+                                {stat.value}
+                              </p>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    )
+                  })()}
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-4">Task 树摘要</h3>
-                    {taskTreeLoading ? (
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">用户发起任务（User Prompt）</h3>
+                    {taskPromptLoading ? (
                       <p className="text-xs text-slate-500">加载中...</p>
-                    ) : selectedTaskTree ? (
-                      <div className="grid grid-cols-3 gap-4 text-xs">
-                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                          <p className="text-slate-400 uppercase tracking-wider mb-1">最大深度</p>
-                          <p className="text-lg font-bold text-slate-800 mono">
-                            {selectedTaskTree.aggregatedStats.depth}
-                          </p>
-                        </div>
-                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                          <p className="text-slate-400 uppercase tracking-wider mb-1">子任务数</p>
-                          <p className="text-lg font-bold text-slate-800 mono">
-                            {selectedTaskTree.aggregatedStats.descendantCount}
-                          </p>
-                        </div>
-                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                          <p className="text-slate-400 uppercase tracking-wider mb-1">聚合 Tokens</p>
-                          <p className="text-lg font-bold text-slate-800 mono">
-                            {selectedTaskTree.aggregatedStats.totalTokens.toLocaleString()}
-                          </p>
-                        </div>
+                    ) : selectedTaskUserPrompt ? (
+                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
+                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
+                          {selectedTaskUserPrompt}
+                        </p>
                       </div>
                     ) : (
-                      <p className="text-xs text-slate-500">暂无任务树数据</p>
+                      <p className="text-xs text-slate-500">未获取到用户发起任务内容</p>
+                    )}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">LLM 输出（Output）</h3>
+                    {taskPromptLoading ? (
+                      <p className="text-xs text-slate-500">加载中...</p>
+                    ) : selectedTaskLlmOutput ? (
+                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
+                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
+                          {selectedTaskLlmOutput}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">未获取到 LLM 输出内容</p>
                     )}
                   </div>
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                     <h3 className="text-sm font-bold text-slate-800 mb-2">任务调用链工作流</h3>
                     <p className="text-xs text-slate-500 mb-4">
-                      展示该用户任务中的一次大模型调用工作流（GitGraph 视图）
+                      按用户要求展示任务调用链（含工具与子代理节点）
                     </p>
                     {selectedTaskWorkflowRun ? (
                       <GitGraphVisualizer data={selectedTaskWorkflowRun} />
@@ -1998,11 +2401,25 @@ export default function App() {
                   >
                     Token 消耗分布
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverviewTab('pricing')}
+                    className={cn(
+                      'px-4 py-2 text-xs font-bold rounded-lg transition-all',
+                      overviewTab === 'pricing'
+                        ? 'bg-white text-blue-600 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    )}
+                  >
+                    模型价格
+                  </button>
                 </div>
                 {overviewTab === 'timeline' ? (
                   <GlobalOverview runs={roots} onLocate={handleLocate} />
-                ) : (
+                ) : overviewTab === 'treemap' ? (
                   <TokenTreemap runs={roots} />
+                ) : (
+                  <PricingTable />
                 )}
               </motion.div>
             ) : !selectedRun ? (
@@ -2051,96 +2468,108 @@ export default function App() {
                   </div>
                   <div className="flex flex-col items-end gap-2">
                     <StatusBadge status={selectedRun.status} />
-                    <div className="flex bg-slate-200 p-1 rounded-lg">
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('details')}
-                        className={cn(
-                          'px-3 py-1 text-[10px] font-bold rounded-md transition-all',
-                          activeTab === 'details'
-                            ? 'bg-white text-blue-600 shadow-sm'
-                            : 'text-slate-500 hover:text-slate-700'
-                        )}
-                      >
-                        详情
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('tree')}
-                        className={cn(
-                          'px-3 py-1 text-[10px] font-bold rounded-md transition-all',
-                          activeTab === 'tree'
-                            ? 'bg-white text-blue-600 shadow-sm'
-                            : 'text-slate-500 hover:text-slate-700'
-                        )}
-                      >
-                        GitGraph 执行流
-                      </button>
-                    </div>
                   </div>
                 </div>
 
-                {activeTab === 'details' ? (
-                  <>
-                <div className="grid grid-cols-4 gap-4">
-                  {[
-                    {
-                      label: 'Input Tokens',
-                      value: selectedRun.usage.input,
-                      icon: <Layers className="w-4 h-4 text-blue-500" />,
-                      color: 'blue',
-                    },
-                    {
-                      label: 'Output Tokens',
-                      value: selectedRun.usage.output,
-                      icon: <Zap className="w-4 h-4 text-emerald-500" />,
-                      color: 'emerald',
-                    },
-                    {
-                      label: 'Total Tokens',
-                      value: totalTokens,
-                      icon: <Activity className="w-4 h-4 text-slate-500" />,
-                      color: 'slate',
-                      estimated: selectedRun.usageEstimated,
-                    },
-                    {
-                      label: 'Requests',
-                      value: selectedRun.requestCount,
-                      icon: <Database className="w-4 h-4 text-amber-500" />,
-                      color: 'amber',
-                    },
-                  ].map((stat, i) => (
-                    <div
-                      key={i}
-                      className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow"
-                    >
-                      <div className="flex items-center justify-between mb-3">
+                <>
+                {(() => {
+                  const inputResult = calculateCost(selectedRun.model || '', selectedRun.usage.input, 0)
+                  const outputResult = calculateCost(selectedRun.model || '', 0, selectedRun.usage.output)
+                  const totalResult = calculateCost(selectedRun.model || '', selectedRun.usage.input, selectedRun.usage.output)
+                  
+                  return (
+                    <div className="grid grid-cols-5 gap-4">
+                      {[
+                        {
+                          label: 'Input Tokens',
+                          value: selectedRun.usage.input.toLocaleString(),
+                          subValue: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
+                          matched: inputResult.matched,
+                          icon: <Layers className="w-4 h-4 text-blue-500" />,
+                          color: 'blue',
+                        },
+                        {
+                          label: 'Output Tokens',
+                          value: selectedRun.usage.output.toLocaleString(),
+                          subValue: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
+                          matched: outputResult.matched,
+                          icon: <Zap className="w-4 h-4 text-emerald-500" />,
+                          color: 'emerald',
+                        },
+                        {
+                          label: 'Total Tokens',
+                          value: totalTokens.toLocaleString(),
+                          subValue: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
+                          matched: totalResult.matched,
+                          icon: <Activity className="w-4 h-4 text-slate-500" />,
+                          color: 'slate',
+                          estimated: selectedRun.usageEstimated,
+                        },
+                        {
+                          label: 'Requests',
+                          value: selectedRun.requestCount.toLocaleString(),
+                          icon: <Database className="w-4 h-4 text-amber-500" />,
+                          color: 'amber',
+                        },
+                        {
+                          label: 'Total Cost',
+                          value: totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配',
+                          matched: totalResult.matched,
+                          icon: <DollarSign className="w-4 h-4 text-emerald-600" />,
+                          color: 'emerald',
+                          isTotalCost: true,
+                        },
+                      ].map((stat, i) => (
                         <div
-                          className={cn(
-                            'p-2 rounded-xl',
-                            stat.color === 'blue' && 'bg-blue-50',
-                            stat.color === 'emerald' && 'bg-emerald-50',
-                            stat.color === 'slate' && 'bg-slate-50',
-                            stat.color === 'amber' && 'bg-amber-50'
-                          )}
+                          key={i}
+                          className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow"
                         >
-                          {stat.icon}
+                          <div className="flex items-center justify-between mb-3">
+                            <div
+                              className={cn(
+                                'p-2 rounded-xl',
+                                stat.color === 'blue' && 'bg-blue-50',
+                                stat.color === 'emerald' && 'bg-emerald-50',
+                                stat.color === 'slate' && 'bg-slate-50',
+                                stat.color === 'amber' && 'bg-amber-50'
+                              )}
+                            >
+                              {stat.icon}
+                            </div>
+                            {stat.estimated && (
+                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                估算
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
+                            {stat.label}
+                          </p>
+                          {stat.subValue ? (
+                            <>
+                              <p className="text-lg font-bold text-slate-900 mono">
+                                {stat.value}
+                              </p>
+                              <p className={cn(
+                                "text-[11px] font-bold mono mt-0.5",
+                                stat.matched ? "text-emerald-600" : "text-slate-400 italic"
+                              )}>
+                                {stat.subValue}
+                              </p>
+                            </>
+                          ) : (
+                            <p className={cn(
+                              "text-2xl font-bold mono",
+                              stat.isTotalCost ? "text-emerald-600" : "text-slate-900"
+                            )}>
+                              {stat.value}
+                            </p>
+                          )}
                         </div>
-                        {stat.estimated && (
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                            估算
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
-                        {stat.label}
-                      </p>
-                      <p className="text-2xl font-bold text-slate-900 mono">
-                        {stat.value.toLocaleString()}
-                      </p>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )
+                })()}
 
                 {/* Context Distribution Treemap */}
                 <ContextDistribution runId={selectedRun.runId} />
@@ -2292,15 +2721,15 @@ export default function App() {
                   </div>
                 )}
 
-                  </>
-                ) : (
-                  <GitGraphVisualizer data={selectedRun} />
-                )}
+                </>
               </motion.div>
             )}
           </AnimatePresence>
         </main>
       </div>
+
+      {/* 价格计算规则说明按钮 */}
+      <PricingInfo />
     </div>
   )
 }

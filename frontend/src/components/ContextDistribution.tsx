@@ -139,35 +139,52 @@ function HistoryList({ messages }: { messages: any[] }) {
 export function ContextDistribution({ runId }: ContextTreemapProps) {
   const [data, setData] = useState<ContextResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedSection, setSelectedSection] = useState<string | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
+  const requestSeqRef = useRef(0)
 
   useEffect(() => {
-    let mounted = true
+    const requestSeq = ++requestSeqRef.current
+    const controller = new AbortController()
+    let debounceTimer: number | null = null
     setSelectedSection(null) // Reset selection when runId changes
 
     async function load() {
-      if (!runId) return
+      if (!runId) {
+        setData(null)
+        setLoadError(null)
+        setLoading(false)
+        return
+      }
       setLoading(true)
+      setLoadError(null)
       try {
-        const res = await fetchContext(runId)
-        if (mounted) {
-          if (res) {
-            setData(res)
-          } else {
-            setData(null)
-          }
+        const res = await fetchContext(runId, { signal: controller.signal, timeoutMs: 12000 })
+        if (requestSeq !== requestSeqRef.current) return
+        if (res) {
+          setData(res)
+          setLoadError(null)
+        } else {
+          setData(null)
+          setLoadError('上下文分析接口暂无数据或请求超时')
         }
       } catch (e) {
-        // ignore error
+        if (requestSeq !== requestSeqRef.current) return
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setData(null)
+        setLoadError('上下文分析加载失败')
       } finally {
-        if (mounted) setLoading(false)
+        if (requestSeq === requestSeqRef.current) setLoading(false)
       }
     }
 
-    load()
+    debounceTimer = window.setTimeout(() => {
+      void load()
+    }, 120)
     return () => {
-      mounted = false
+      if (debounceTimer != null) window.clearTimeout(debounceTimer)
+      controller.abort()
     }
   }, [runId])
 
@@ -333,7 +350,12 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
   }
 
   if (!treemapData || !data) {
-    return null
+    if (!loadError) return null
+    return (
+      <div className="h-40 flex items-center justify-center bg-slate-50 rounded-2xl border border-slate-100">
+        <div className="text-xs text-slate-500">{loadError}</div>
+      </div>
+    )
   }
 
   return (

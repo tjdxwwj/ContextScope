@@ -157,10 +157,20 @@ const plugin = {
         const inputRequest = await storage.getInputForRun(event.runId);
         const inputTokens = inputRequest?.usage?.input ?? 0;
         
+        // 优先使用 rawUsage 中的 output，如果没有则尝试从 total 推算
+        let outputTokens = 0;
+        if (rawUsage) {
+          outputTokens = rawUsage.output ?? 0;
+          // 如果 output 为 0 但有 total，尝试推算
+          if (outputTokens === 0 && rawUsage.total != null) {
+            outputTokens = rawUsage.total - (rawUsage.input ?? inputTokens);
+          }
+        }
+        
         const usage = rawUsage
           ? {
               input: inputTokens > 0 ? inputTokens : (rawUsage.input ?? 0),
-              output: rawUsage.output,
+              output: outputTokens,
               cacheRead: rawUsage.cacheRead,
               cacheWrite: rawUsage.cacheWrite,
               total: rawUsage.total ?? (rawUsage as { totalTokens?: number }).totalTokens,
@@ -172,11 +182,12 @@ const plugin = {
             };
         
         // 记录到任务追踪器
+        api.logger.debug?.(`[TaskTracker] recordLLMCall: input=${inputTokens}, output=${outputTokens}`);
         await taskTracker.recordLLMCall(
           event.sessionId,
           event.runId,
           inputTokens,
-          rawUsage?.output ?? 0
+          outputTokens
         );
         
         await service.captureResponse({

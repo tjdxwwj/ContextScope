@@ -6,6 +6,7 @@
 import type { RawStore, RequestData, SubagentLinkData, ToolCallData } from './rawTypes'
 
 const API_BASE = '/plugins/contextscope/api'
+const CONTEXT_CACHE_TTL_MS = 8000
 
 export interface ChainResponse {
   runId: string
@@ -286,14 +287,57 @@ export interface ContextResponse {
     toolResponsesPercentage: number;
   }
 }
+const contextCache = new Map<string, { data: ContextResponse; expiresAt: number }>()
 
-export async function fetchContext(runId: string): Promise<ContextResponse | null> {
+export async function fetchContext(
+  runId: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number; cacheTtlMs?: number }
+): Promise<ContextResponse | null> {
+  const cacheEntry = contextCache.get(runId)
+  if (cacheEntry && cacheEntry.expiresAt > Date.now()) {
+    return cacheEntry.data
+  }
+  if (cacheEntry) {
+    contextCache.delete(runId)
+  }
+
+  const controller = new AbortController()
+  let timeoutTriggered = false
+  const timeoutId = window.setTimeout(() => {
+    timeoutTriggered = true
+    controller.abort()
+  }, options?.timeoutMs ?? 10000)
+  const externalSignal = options?.signal
+  const onExternalAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+  }
   try {
-    const res = await fetch(`${API_BASE}/context?runId=${encodeURIComponent(runId)}`)
+    const res = await fetch(`${API_BASE}/context?runId=${encodeURIComponent(runId)}`, {
+      signal: controller.signal,
+    })
     if (!res.ok) return null
-    return await res.json()
+    const payload = await res.json()
+    const contextData = (payload?.data ?? payload) as ContextResponse
+    const ttlMs = options?.cacheTtlMs ?? CONTEXT_CACHE_TTL_MS
+    contextCache.set(runId, { data: contextData, expiresAt: Date.now() + ttlMs })
+    if (contextCache.size > 100) {
+      const now = Date.now()
+      for (const [key, entry] of contextCache) {
+        if (entry.expiresAt <= now) contextCache.delete(key)
+      }
+    }
+    return contextData
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      if (timeoutTriggered) return null
+      throw error
+    }
     console.error('Failed to fetch context:', error)
     return null
+  } finally {
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort)
+    window.clearTimeout(timeoutId)
   }
 }

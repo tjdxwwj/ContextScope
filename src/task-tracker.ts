@@ -101,7 +101,7 @@ export class TaskTracker {
     task.stats.totalInput += input;
     task.stats.totalOutput += output;
     task.stats.totalTokens = task.stats.totalInput + task.stats.totalOutput;
-    task.stats.estimatedCost = this.estimateCost(task.stats.totalTokens);
+    task.stats.estimatedCost = this.estimateCost(task.stats.totalInput, task.stats.totalOutput);
     
     if (!task.runIds.includes(runId)) {
       task.runIds.push(runId);
@@ -215,11 +215,13 @@ export class TaskTracker {
   }
 
   /**
-   * Estimate cost (simplified)
-   * Assumes $0.01/1K tokens average cost
+   * Estimate cost based on input/output tokens
+   * Uses average pricing: $0.001/1K input, $0.003/1K output
    */
-  private estimateCost(tokens: number): number {
-    return (tokens / 1000) * 0.01;
+  private estimateCost(inputTokens: number, outputTokens: number): number {
+    const inputCost = (inputTokens / 1_000_000) * 1;  // $1 per 1M input
+    const outputCost = (outputTokens / 1_000_000) * 3; // $3 per 1M output
+    return inputCost + outputCost;
   }
 
   /**

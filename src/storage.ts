@@ -92,11 +92,17 @@ export class RequestAnalyzerStorage {
   private tasks: TaskData[] = [];  // ← 新增：任务数组
   private subagentLinks: SubagentLinkData[] = [];
   private toolCalls: ToolCallData[] = [];
+  private sqliteDb: any | null = null;
+  private sqliteEnabled = false;
   private options: StorageOptions;
   private initialized = false;
   private nextId = 1;
   private nextLinkId = 1;
   private nextToolCallId = 1;
+  private persistTimer: NodeJS.Timeout | null = null;
+  private persistInFlight: Promise<void> | null = null;
+  private pendingPersist = false;
+  private readonly persistDebounceMs = 500;
 
   constructor(options: StorageOptions) {
     this.options = options;
@@ -157,11 +163,17 @@ export class RequestAnalyzerStorage {
       this.nextToolCallId = Math.max(this.nextToolCallId, this.getNextIdFromItems(this.toolCalls));
 
       const hadLegacyFile = fs.existsSync(this.legacyDataFile);
+      await this.initializeSqlite();
+      if (this.sqliteEnabled) {
+        this.requests = [];
+        this.subagentLinks = [];
+        this.toolCalls = [];
+      }
 
       this.initialized = true;
 
       if (hadLegacyFile) {
-        await this.persist();
+        await this.persistImmediately();
         fs.unlinkSync(this.legacyDataFile);
       }
 
@@ -183,15 +195,16 @@ export class RequestAnalyzerStorage {
         toolCalls: ToolCallData[];
       }>();
 
-      for (const request of this.requests) {
-        const key = this.getDateKey(request.timestamp);
-        if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+      if (!this.sqliteEnabled) {
+        for (const request of this.requests) {
+          const key = this.getDateKey(request.timestamp);
+          if (!grouped.has(key)) {
+            grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+          }
+          grouped.get(key)!.requests.push(request);
         }
-        grouped.get(key)!.requests.push(request);
       }
 
-      // 按日期分组任务
       for (const task of this.tasks) {
         const key = this.getDateKey(task.startTime);
         if (!grouped.has(key)) {
@@ -200,20 +213,22 @@ export class RequestAnalyzerStorage {
         grouped.get(key)!.tasks.push(task);
       }
 
-      for (const link of this.subagentLinks) {
-        const key = this.getDateKey(link.timestamp);
-        if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+      if (!this.sqliteEnabled) {
+        for (const link of this.subagentLinks) {
+          const key = this.getDateKey(link.timestamp);
+          if (!grouped.has(key)) {
+            grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+          }
+          grouped.get(key)!.subagentLinks.push(link);
         }
-        grouped.get(key)!.subagentLinks.push(link);
-      }
 
-      for (const toolCall of this.toolCalls) {
-        const key = this.getDateKey(toolCall.timestamp);
-        if (!grouped.has(key)) {
-          grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+        for (const toolCall of this.toolCalls) {
+          const key = this.getDateKey(toolCall.timestamp);
+          if (!grouped.has(key)) {
+            grouped.set(key, { requests: [], tasks: [], subagentLinks: [], toolCalls: [] });
+          }
+          grouped.get(key)!.toolCalls.push(toolCall);
         }
-        grouped.get(key)!.toolCalls.push(toolCall);
       }
 
       const activeFiles = new Set<string>();
@@ -250,6 +265,280 @@ export class RequestAnalyzerStorage {
     }
   }
 
+  private schedulePersist(): void {
+    if (!this.initialized) return;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.runPersist();
+    }, this.persistDebounceMs);
+  }
+
+  private async runPersist(): Promise<void> {
+    if (this.persistInFlight) {
+      this.pendingPersist = true;
+      return;
+    }
+    this.persistInFlight = this.persist();
+    try {
+      await this.persistInFlight;
+    } finally {
+      this.persistInFlight = null;
+      if (this.pendingPersist) {
+        this.pendingPersist = false;
+        this.schedulePersist();
+      }
+    }
+  }
+
+  private async persistImmediately(): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (this.persistInFlight) {
+      await this.persistInFlight;
+    }
+    await this.persist();
+  }
+
+  private async initializeSqlite(): Promise<void> {
+    try {
+      const dynamicImport = new Function('moduleName', 'return import(moduleName)') as (moduleName: string) => Promise<unknown>;
+      const sqliteModule = await dynamicImport('node:sqlite');
+      const DatabaseSync = (sqliteModule as any).DatabaseSync;
+      if (!DatabaseSync) return;
+      const dbFile = path.join(this.options.workspaceDir, 'contextscope.db');
+      const db = new DatabaseSync(dbFile);
+      db.exec(`
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;
+        CREATE TABLE IF NOT EXISTS requests (
+          id INTEGER PRIMARY KEY,
+          type TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          task_id TEXT,
+          session_id TEXT NOT NULL,
+          session_key TEXT,
+          provider TEXT,
+          model TEXT,
+          timestamp INTEGER NOT NULL,
+          prompt TEXT,
+          system_prompt TEXT,
+          history_messages TEXT,
+          assistant_texts TEXT,
+          usage_json TEXT,
+          images_count INTEGER,
+          metadata_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_requests_run_ts ON requests(run_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_requests_session_ts ON requests(session_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp DESC);
+        CREATE TABLE IF NOT EXISTS tool_calls (
+          id INTEGER PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          session_id TEXT,
+          session_key TEXT,
+          tool_name TEXT NOT NULL,
+          tool_call_id TEXT,
+          timestamp INTEGER NOT NULL,
+          started_at INTEGER,
+          duration_ms INTEGER,
+          params_json TEXT,
+          result_json TEXT,
+          error TEXT,
+          metadata_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_run_ts ON tool_calls(run_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_session_ts ON tool_calls(session_id, timestamp DESC);
+        CREATE TABLE IF NOT EXISTS subagent_links (
+          id INTEGER PRIMARY KEY,
+          kind TEXT,
+          parent_run_id TEXT NOT NULL,
+          child_run_id TEXT,
+          parent_session_id TEXT,
+          parent_session_key TEXT,
+          child_session_key TEXT,
+          runtime TEXT,
+          mode TEXT,
+          label TEXT,
+          tool_call_id TEXT,
+          timestamp INTEGER NOT NULL,
+          ended_at INTEGER,
+          outcome TEXT,
+          error TEXT,
+          metadata_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_run_ts ON subagent_links(parent_run_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_subagent_links_child_run_ts ON subagent_links(child_run_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_session_ts ON subagent_links(parent_session_id, timestamp DESC);
+      `);
+      this.sqliteDb = db;
+      this.sqliteEnabled = true;
+      this.options.logger.info('ContextScope storage SQLite enabled');
+    } catch (error) {
+      this.sqliteDb = null;
+      this.sqliteEnabled = false;
+      this.options.logger.warn(`SQLite unavailable, fallback to JSON storage: ${error}`);
+    }
+  }
+
+  private toJson(value: unknown): string | null {
+    if (value == null) return null;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  }
+
+  private parseJson<T>(value: unknown): T | undefined {
+    if (typeof value !== 'string' || value.length === 0) return undefined;
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private sqliteUpsertRequest(data: RequestData): void {
+    if (!this.sqliteEnabled || !this.sqliteDb) return;
+    this.sqliteDb
+      .prepare(`INSERT OR REPLACE INTO requests (
+        id, type, run_id, task_id, session_id, session_key, provider, model, timestamp,
+        prompt, system_prompt, history_messages, assistant_texts, usage_json, images_count, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        data.id ?? null,
+        data.type,
+        data.runId,
+        data.taskId ?? null,
+        data.sessionId,
+        data.sessionKey ?? null,
+        data.provider,
+        data.model,
+        data.timestamp,
+        data.prompt ?? null,
+        data.systemPrompt ?? null,
+        this.toJson(data.historyMessages),
+        this.toJson(data.assistantTexts),
+        this.toJson(data.usage),
+        data.imagesCount ?? null,
+        this.toJson(data.metadata)
+      );
+  }
+
+  private sqliteUpsertToolCall(data: ToolCallData): void {
+    if (!this.sqliteEnabled || !this.sqliteDb) return;
+    this.sqliteDb
+      .prepare(`INSERT OR REPLACE INTO tool_calls (
+        id, run_id, session_id, session_key, tool_name, tool_call_id, timestamp, started_at,
+        duration_ms, params_json, result_json, error, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        data.id ?? null,
+        data.runId,
+        data.sessionId ?? null,
+        data.sessionKey ?? null,
+        data.toolName,
+        data.toolCallId ?? null,
+        data.timestamp,
+        data.startedAt ?? null,
+        data.durationMs ?? null,
+        this.toJson(data.params),
+        this.toJson(data.result),
+        data.error ?? null,
+        this.toJson(data.metadata)
+      );
+  }
+
+  private sqliteUpsertSubagentLink(data: SubagentLinkData): void {
+    if (!this.sqliteEnabled || !this.sqliteDb) return;
+    this.sqliteDb
+      .prepare(`INSERT OR REPLACE INTO subagent_links (
+        id, kind, parent_run_id, child_run_id, parent_session_id, parent_session_key, child_session_key,
+        runtime, mode, label, tool_call_id, timestamp, ended_at, outcome, error, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        data.id ?? null,
+        data.kind ?? null,
+        data.parentRunId,
+        data.childRunId ?? null,
+        data.parentSessionId ?? null,
+        data.parentSessionKey ?? null,
+        data.childSessionKey ?? null,
+        data.runtime ?? null,
+        data.mode ?? null,
+        data.label ?? null,
+        data.toolCallId ?? null,
+        data.timestamp,
+        data.endedAt ?? null,
+        data.outcome ?? null,
+        data.error ?? null,
+        this.toJson(data.metadata)
+      );
+  }
+
+  private fromSqliteRequestRow(row: any): RequestData {
+    return {
+      id: row.id,
+      type: row.type,
+      runId: row.run_id,
+      taskId: row.task_id ?? undefined,
+      sessionId: row.session_id,
+      sessionKey: row.session_key ?? undefined,
+      provider: row.provider,
+      model: row.model,
+      timestamp: row.timestamp,
+      prompt: row.prompt ?? undefined,
+      systemPrompt: row.system_prompt ?? undefined,
+      historyMessages: this.parseJson<unknown[]>(row.history_messages),
+      assistantTexts: this.parseJson<string[]>(row.assistant_texts),
+      usage: this.parseJson<RequestData['usage']>(row.usage_json),
+      imagesCount: row.images_count ?? undefined,
+      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
+    };
+  }
+
+  private fromSqliteToolCallRow(row: any): ToolCallData {
+    return {
+      id: row.id,
+      runId: row.run_id,
+      sessionId: row.session_id ?? undefined,
+      sessionKey: row.session_key ?? undefined,
+      toolName: row.tool_name,
+      toolCallId: row.tool_call_id ?? undefined,
+      timestamp: row.timestamp,
+      startedAt: row.started_at ?? undefined,
+      durationMs: row.duration_ms ?? undefined,
+      params: this.parseJson<Record<string, unknown>>(row.params_json),
+      result: this.parseJson<unknown>(row.result_json),
+      error: row.error ?? undefined,
+      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
+    };
+  }
+
+  private fromSqliteSubagentLinkRow(row: any): SubagentLinkData {
+    return {
+      id: row.id,
+      kind: row.kind ?? undefined,
+      parentRunId: row.parent_run_id,
+      childRunId: row.child_run_id ?? undefined,
+      parentSessionId: row.parent_session_id ?? undefined,
+      parentSessionKey: row.parent_session_key ?? undefined,
+      childSessionKey: row.child_session_key ?? undefined,
+      runtime: row.runtime ?? undefined,
+      mode: row.mode ?? undefined,
+      label: row.label ?? undefined,
+      toolCallId: row.tool_call_id ?? undefined,
+      timestamp: row.timestamp,
+      endedAt: row.ended_at ?? undefined,
+      outcome: row.outcome ?? undefined,
+      error: row.error ?? undefined,
+      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
+    };
+  }
+
   async captureRequest(data: RequestData): Promise<void> {
     if (!this.initialized) await this.initialize();
 
@@ -258,14 +547,16 @@ export class RequestAnalyzerStorage {
         ...data,
         id: this.nextId++
       };
-
-      this.requests.unshift(requestWithId); // Add to beginning for latest-first order
+      if (this.sqliteEnabled) {
+        this.sqliteUpsertRequest(requestWithId);
+      } else {
+        this.requests.unshift(requestWithId);
+      }
 
       // Cleanup old requests if needed
       this.cleanupOldRequests();
       
-      // Persist to disk (debounced in production, but simple here)
-      await this.persist();
+      this.schedulePersist();
       
     } catch (error) {
       this.options.logger.error(`Failed to capture request: ${error}`);
@@ -278,6 +569,12 @@ export class RequestAnalyzerStorage {
    */
   async getInputForRun(runId: string): Promise<RequestData | undefined> {
     if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const row = this.sqliteDb
+        .prepare(`SELECT * FROM requests WHERE run_id = ? AND type = 'input' ORDER BY timestamp DESC, id DESC LIMIT 1`)
+        .get(runId);
+      return row ? this.fromSqliteRequestRow(row) : undefined;
+    }
     return this.requests.find(r => r.runId === runId && r.type === 'input');
   }
 
@@ -304,7 +601,7 @@ export class RequestAnalyzerStorage {
       }
 
       this.cleanupOldRequests();
-      await this.persist();
+      this.schedulePersist();
     } catch (error) {
       this.options.logger.error(`Failed to capture task: ${error}`);
       throw error;
@@ -320,7 +617,7 @@ export class RequestAnalyzerStorage {
     const task = this.tasks.find(t => t.taskId === taskId);
     if (task) {
       task.stats = { ...task.stats, ...stats };
-      await this.persist();
+      this.schedulePersist();
       this.options.logger.debug?.(`Updated stats for task ${taskId}`);
     }
   }
@@ -459,10 +756,13 @@ export class RequestAnalyzerStorage {
         outcome: data.outcome ?? undefined,
         id: this.nextLinkId++
       };
-
-      this.subagentLinks.unshift(recordWithId);
+      if (this.sqliteEnabled) {
+        this.sqliteUpsertSubagentLink(recordWithId);
+      } else {
+        this.subagentLinks.unshift(recordWithId);
+      }
       this.cleanupOldRequests();
-      await this.persist();
+      this.schedulePersist();
     } catch (error) {
       this.options.logger.error(`Failed to capture subagent link: ${error}`);
       throw error;
@@ -480,22 +780,38 @@ export class RequestAnalyzerStorage {
       return;
     }
 
-    const idx = this.subagentLinks.findIndex(r => r.childRunId === childRunId);
-    if (idx < 0) {
-      return;
-    }
-
-    const current = this.subagentLinks[idx];
-    const next: SubagentLinkData = {
-      ...current,
-      ...params.patch,
-      metadata: {
-        ...(current.metadata || {}),
-        ...(params.patch.metadata || {})
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const row = this.sqliteDb
+        .prepare(`SELECT * FROM subagent_links WHERE child_run_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1`)
+        .get(childRunId);
+      if (!row) return;
+      const current = this.fromSqliteSubagentLinkRow(row);
+      const next: SubagentLinkData = {
+        ...current,
+        ...params.patch,
+        metadata: {
+          ...(current.metadata || {}),
+          ...(params.patch.metadata || {})
+        }
+      };
+      this.sqliteUpsertSubagentLink(next);
+    } else {
+      const idx = this.subagentLinks.findIndex(r => r.childRunId === childRunId);
+      if (idx < 0) {
+        return;
       }
-    };
-    this.subagentLinks[idx] = next;
-    await this.persist();
+      const current = this.subagentLinks[idx];
+      const next: SubagentLinkData = {
+        ...current,
+        ...params.patch,
+        metadata: {
+          ...(current.metadata || {}),
+          ...(params.patch.metadata || {})
+        }
+      };
+      this.subagentLinks[idx] = next;
+    }
+    this.schedulePersist();
   }
 
   async captureToolCall(data: ToolCallData): Promise<void> {
@@ -506,9 +822,13 @@ export class RequestAnalyzerStorage {
         ...data,
         id: this.nextToolCallId++
       };
-      this.toolCalls.unshift(recordWithId);
+      if (this.sqliteEnabled) {
+        this.sqliteUpsertToolCall(recordWithId);
+      } else {
+        this.toolCalls.unshift(recordWithId);
+      }
       this.cleanupOldRequests();
-      await this.persist();
+      this.schedulePersist();
     } catch (error) {
       this.options.logger.error(`Failed to capture tool call: ${error}`);
       throw error;
@@ -526,32 +846,58 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<RequestData[]> {
     if (!this.initialized) await this.initialize();
-
-    let filtered = [...this.requests];
-
-    if (filters.sessionId) {
-      filtered = filtered.filter(r => r.sessionId === filters.sessionId);
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      if (filters.sessionId) {
+        clauses.push('session_id = ?');
+        params.push(filters.sessionId);
+      }
+      if (filters.runId) {
+        clauses.push('run_id = ?');
+        params.push(filters.runId);
+      }
+      if (filters.provider) {
+        clauses.push('provider = ?');
+        params.push(filters.provider);
+      }
+      if (filters.model) {
+        clauses.push('model = ?');
+        params.push(filters.model);
+      }
+      if (filters.startTime) {
+        clauses.push('timestamp >= ?');
+        params.push(filters.startTime);
+      }
+      if (filters.endTime) {
+        clauses.push('timestamp <= ?');
+        params.push(filters.endTime);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const offset = filters.offset || 0;
+      const limit = filters.limit || 100;
+      const sql = `SELECT * FROM requests ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
+      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
+      return rows.map((row: any) => this.fromSqliteRequestRow(row));
     }
-    if (filters.runId) {
-      filtered = filtered.filter(r => r.runId === filters.runId);
-    }
-    if (filters.provider) {
-      filtered = filtered.filter(r => r.provider === filters.provider);
-    }
-    if (filters.model) {
-      filtered = filtered.filter(r => r.model === filters.model);
-    }
-    if (filters.startTime) {
-      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
-    }
-    if (filters.endTime) {
-      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
-    }
-
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
-
-    return filtered.slice(offset, offset + limit);
+    const result: RequestData[] = [];
+    let matched = 0;
+    for (const request of this.requests) {
+      if (filters.sessionId && request.sessionId !== filters.sessionId) continue;
+      if (filters.runId && request.runId !== filters.runId) continue;
+      if (filters.provider && request.provider !== filters.provider) continue;
+      if (filters.model && request.model !== filters.model) continue;
+      if (filters.startTime && request.timestamp < filters.startTime) continue;
+      if (filters.endTime && request.timestamp > filters.endTime) continue;
+      if (matched >= offset && result.length < limit) {
+        result.push(request);
+      }
+      matched++;
+      if (result.length >= limit) break;
+    }
+    return result;
   }
 
   async getToolCalls(filters: {
@@ -564,28 +910,53 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<ToolCallData[]> {
     if (!this.initialized) await this.initialize();
-
-    let filtered = [...this.toolCalls];
-
-    if (filters.runId) {
-      filtered = filtered.filter(r => r.runId === filters.runId);
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      if (filters.runId) {
+        clauses.push('run_id = ?');
+        params.push(filters.runId);
+      }
+      if (filters.sessionId) {
+        clauses.push('session_id = ?');
+        params.push(filters.sessionId);
+      }
+      if (filters.toolName) {
+        clauses.push('tool_name = ?');
+        params.push(filters.toolName);
+      }
+      if (filters.startTime) {
+        clauses.push('timestamp >= ?');
+        params.push(filters.startTime);
+      }
+      if (filters.endTime) {
+        clauses.push('timestamp <= ?');
+        params.push(filters.endTime);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const offset = filters.offset || 0;
+      const limit = filters.limit || 100;
+      const sql = `SELECT * FROM tool_calls ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
+      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
+      return rows.map((row: any) => this.fromSqliteToolCallRow(row));
     }
-    if (filters.sessionId) {
-      filtered = filtered.filter(r => r.sessionId === filters.sessionId);
-    }
-    if (filters.toolName) {
-      filtered = filtered.filter(r => r.toolName === filters.toolName);
-    }
-    if (filters.startTime) {
-      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
-    }
-    if (filters.endTime) {
-      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
-    }
-
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
-    return filtered.slice(offset, offset + limit);
+    const result: ToolCallData[] = [];
+    let matched = 0;
+    for (const toolCall of this.toolCalls) {
+      if (filters.runId && toolCall.runId !== filters.runId) continue;
+      if (filters.sessionId && toolCall.sessionId !== filters.sessionId) continue;
+      if (filters.toolName && toolCall.toolName !== filters.toolName) continue;
+      if (filters.startTime && toolCall.timestamp < filters.startTime) continue;
+      if (filters.endTime && toolCall.timestamp > filters.endTime) continue;
+      if (matched >= offset && result.length < limit) {
+        result.push(toolCall);
+      }
+      matched++;
+      if (result.length >= limit) break;
+    }
+    return result;
   }
 
   async getSubagentLinks(filters: {
@@ -598,28 +969,53 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<SubagentLinkData[]> {
     if (!this.initialized) await this.initialize();
-
-    let filtered = [...this.subagentLinks];
-
-    if (filters.parentRunId) {
-      filtered = filtered.filter(r => r.parentRunId === filters.parentRunId);
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      if (filters.parentRunId) {
+        clauses.push('parent_run_id = ?');
+        params.push(filters.parentRunId);
+      }
+      if (filters.childRunId) {
+        clauses.push('child_run_id = ?');
+        params.push(filters.childRunId);
+      }
+      if (filters.parentSessionId) {
+        clauses.push('parent_session_id = ?');
+        params.push(filters.parentSessionId);
+      }
+      if (filters.startTime) {
+        clauses.push('timestamp >= ?');
+        params.push(filters.startTime);
+      }
+      if (filters.endTime) {
+        clauses.push('timestamp <= ?');
+        params.push(filters.endTime);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const offset = filters.offset || 0;
+      const limit = filters.limit || 100;
+      const sql = `SELECT * FROM subagent_links ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
+      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
+      return rows.map((row: any) => this.fromSqliteSubagentLinkRow(row));
     }
-    if (filters.childRunId) {
-      filtered = filtered.filter(r => r.childRunId === filters.childRunId);
-    }
-    if (filters.parentSessionId) {
-      filtered = filtered.filter(r => r.parentSessionId === filters.parentSessionId);
-    }
-    if (filters.startTime) {
-      filtered = filtered.filter(r => r.timestamp >= filters.startTime!);
-    }
-    if (filters.endTime) {
-      filtered = filtered.filter(r => r.timestamp <= filters.endTime!);
-    }
-
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
-    return filtered.slice(offset, offset + limit);
+    const result: SubagentLinkData[] = [];
+    let matched = 0;
+    for (const link of this.subagentLinks) {
+      if (filters.parentRunId && link.parentRunId !== filters.parentRunId) continue;
+      if (filters.childRunId && link.childRunId !== filters.childRunId) continue;
+      if (filters.parentSessionId && link.parentSessionId !== filters.parentSessionId) continue;
+      if (filters.startTime && link.timestamp < filters.startTime) continue;
+      if (filters.endTime && link.timestamp > filters.endTime) continue;
+      if (matched >= offset && result.length < limit) {
+        result.push(link);
+      }
+      matched++;
+      if (result.length >= limit) break;
+    }
+    return result;
   }
 
   async getStats(): Promise<StorageStats> {
@@ -634,10 +1030,16 @@ export class RequestAnalyzerStorage {
     const todayTime = today.getTime();
     const weekAgoTime = weekAgo.getTime();
 
-    const totalRequests = this.requests.length;
-    const todayRequests = this.requests.filter(r => r.timestamp >= todayTime).length;
-    const weekRequests = this.requests.filter(r => r.timestamp >= weekAgoTime).length;
-    const oldestRequest = this.requests.length > 0 ? this.requests[this.requests.length - 1].timestamp : undefined;
+    let totalRequests = this.requests.length;
+    let todayRequests = this.requests.filter(r => r.timestamp >= todayTime).length;
+    let weekRequests = this.requests.filter(r => r.timestamp >= weekAgoTime).length;
+    let oldestRequest = this.requests.length > 0 ? this.requests[this.requests.length - 1].timestamp : undefined;
+    if (this.sqliteEnabled && this.sqliteDb) {
+      totalRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests').get()?.c || 0);
+      todayRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ?').get(todayTime)?.c || 0);
+      weekRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ?').get(weekAgoTime)?.c || 0);
+      oldestRequest = this.sqliteDb.prepare('SELECT timestamp FROM requests ORDER BY timestamp ASC LIMIT 1').get()?.timestamp;
+    }
 
     return {
       totalRequests,
@@ -661,6 +1063,10 @@ export class RequestAnalyzerStorage {
       for (const filePath of this.getDatedDataFiles()) {
         bytes += fs.statSync(filePath).size;
       }
+      const sqliteFile = path.join(this.options.workspaceDir, 'contextscope.db');
+      if (fs.existsSync(sqliteFile)) {
+        bytes += fs.statSync(sqliteFile).size;
+      }
       
       if (bytes < 1024) return `${bytes} B`;
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -672,6 +1078,27 @@ export class RequestAnalyzerStorage {
 
   private cleanupOldRequests(): void {
     const cutoffTime = Date.now() - (this.options.retentionDays * 24 * 60 * 60 * 1000);
+    if (this.sqliteEnabled && this.sqliteDb) {
+      this.sqliteDb.prepare('DELETE FROM requests WHERE timestamp < ?').run(cutoffTime);
+      this.sqliteDb.prepare('DELETE FROM subagent_links WHERE timestamp < ?').run(cutoffTime);
+      this.sqliteDb.prepare('DELETE FROM tool_calls WHERE timestamp < ?').run(cutoffTime);
+      this.sqliteDb.prepare(
+        `DELETE FROM requests WHERE id NOT IN (
+          SELECT id FROM requests ORDER BY timestamp DESC, id DESC LIMIT ?
+        )`
+      ).run(this.options.maxRequests);
+      this.sqliteDb.prepare(
+        `DELETE FROM subagent_links WHERE id NOT IN (
+          SELECT id FROM subagent_links ORDER BY timestamp DESC, id DESC LIMIT ?
+        )`
+      ).run(this.options.maxRequests);
+      this.sqliteDb.prepare(
+        `DELETE FROM tool_calls WHERE id NOT IN (
+          SELECT id FROM tool_calls ORDER BY timestamp DESC, id DESC LIMIT ?
+        )`
+      ).run(this.options.maxRequests);
+      return;
+    }
     
     // Remove old requests
     this.requests = this.requests.filter(r => r.timestamp >= cutoffTime);
@@ -691,7 +1118,14 @@ export class RequestAnalyzerStorage {
   }
 
   async close(): Promise<void> {
-    await this.persist();
+    await this.persistImmediately();
+    if (this.sqliteDb) {
+      try {
+        this.sqliteDb.close?.();
+      } catch {
+      }
+      this.sqliteDb = null;
+    }
     this.initialized = false;
   }
 
@@ -702,36 +1136,52 @@ export class RequestAnalyzerStorage {
       throw new Error('Invalid date format, expected YYYY-MM-DD');
     }
 
-    const beforeRequests = this.requests.length;
-    const beforeLinks = this.subagentLinks.length;
-    const beforeToolCalls = this.toolCalls.length;
+    let beforeRequests = this.requests.length;
+    let beforeLinks = this.subagentLinks.length;
+    let beforeToolCalls = this.toolCalls.length;
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const start = new Date(`${dateKey}T00:00:00`).getTime();
+      const end = new Date(`${dateKey}T23:59:59.999`).getTime();
+      beforeRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
+      beforeLinks = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM subagent_links WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
+      beforeToolCalls = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM tool_calls WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
+      this.sqliteDb.prepare('DELETE FROM requests WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
+      this.sqliteDb.prepare('DELETE FROM subagent_links WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
+      this.sqliteDb.prepare('DELETE FROM tool_calls WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
+    } else {
+      this.requests = this.requests.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+      this.subagentLinks = this.subagentLinks.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+      this.toolCalls = this.toolCalls.filter(item => this.getDateKey(item.timestamp) !== dateKey);
+    }
 
-    this.requests = this.requests.filter(item => this.getDateKey(item.timestamp) !== dateKey);
-    this.subagentLinks = this.subagentLinks.filter(item => this.getDateKey(item.timestamp) !== dateKey);
-    this.toolCalls = this.toolCalls.filter(item => this.getDateKey(item.timestamp) !== dateKey);
-
-    await this.persist();
+    await this.persistImmediately();
 
     return {
       date: dateKey,
-      removedRequests: beforeRequests - this.requests.length,
-      removedSubagentLinks: beforeLinks - this.subagentLinks.length,
-      removedToolCalls: beforeToolCalls - this.toolCalls.length
+      removedRequests: this.sqliteEnabled ? beforeRequests : beforeRequests - this.requests.length,
+      removedSubagentLinks: this.sqliteEnabled ? beforeLinks : beforeLinks - this.subagentLinks.length,
+      removedToolCalls: this.sqliteEnabled ? beforeToolCalls : beforeToolCalls - this.toolCalls.length
     };
   }
 
   async clearAll(): Promise<{ removedRequests: number; removedSubagentLinks: number; removedToolCalls: number }> {
     if (!this.initialized) await this.initialize();
 
-    const removedRequests = this.requests.length;
-    const removedSubagentLinks = this.subagentLinks.length;
-    const removedToolCalls = this.toolCalls.length;
+    let removedRequests = this.requests.length;
+    let removedSubagentLinks = this.subagentLinks.length;
+    let removedToolCalls = this.toolCalls.length;
+    if (this.sqliteEnabled && this.sqliteDb) {
+      removedRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests').get()?.c || 0);
+      removedSubagentLinks = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM subagent_links').get()?.c || 0);
+      removedToolCalls = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM tool_calls').get()?.c || 0);
+      this.sqliteDb.exec('DELETE FROM requests; DELETE FROM subagent_links; DELETE FROM tool_calls;');
+    } else {
+      this.requests = [];
+      this.subagentLinks = [];
+      this.toolCalls = [];
+    }
 
-    this.requests = [];
-    this.subagentLinks = [];
-    this.toolCalls = [];
-
-    await this.persist();
+    await this.persistImmediately();
 
     return {
       removedRequests,

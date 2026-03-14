@@ -916,6 +916,106 @@ export class RequestAnalyzerService {
       }
     };
   }
+
+  // ==================== OpenRouter Pricing Methods ====================
+
+  /**
+   * 获取 OpenRouter 模型价格列表
+   * 从 OpenRouter API 获取当日模型价格
+   */
+  async getOpenRouterPricing(): Promise<ModelCostInfo[]> {
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/models', {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+        // 5 秒超时
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (!response.ok) {
+        this.logger.warn(`OpenRouter API returned ${response.status}`);
+        return [];
+      }
+
+      const data = await response.json() as OpenRouterModelsResponse;
+      
+      // 转换为简化的价格信息
+      const pricingInfo: ModelCostInfo[] = data.data.map(model => {
+        const pricing = model.pricing || {};
+        const promptPrice = pricing.prompt ? parseFloat(pricing.prompt) : 0;
+        const completionPrice = pricing.completion ? parseFloat(pricing.completion) : 0;
+        
+        // 转换为每 1M tokens 的价格（OpenRouter 返回的是每 token 价格）
+        return {
+          modelId: model.id,
+          modelName: model.name || model.id.split('/').pop() || model.id,
+          promptPricePer1M: Math.round(promptPrice * 1_000_000 * 1000) / 1000, // 保留 3 位小数
+          completionPricePer1M: Math.round(completionPrice * 1_000_000 * 1000) / 1000,
+          contextLength: model.context_length,
+          provider: model.id.split('/')[0]
+        };
+      });
+
+      // 按模型名称排序
+      pricingInfo.sort((a, b) => a.modelName.localeCompare(b.modelName));
+
+      this.logger.info?.(`Fetched ${pricingInfo.length} models from OpenRouter pricing API`);
+      return pricingInfo;
+    } catch (error) {
+      this.logger.error(`Failed to fetch OpenRouter pricing: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * 计算指定模型调用的实际成本
+   */
+  calculateModelCost(usage: { input?: number; output?: number; total?: number }, modelId: string): number {
+    const totalTokens = usage.total || (usage.input || 0) + (usage.output || 0);
+    if (totalTokens === 0) return 0;
+
+    // 这里可以缓存价格数据，避免每次都调用 API
+    // 简化版本：使用硬编码的常见模型价格
+    const modelPricing: Record<string, { input: number; output: number }> = {
+      // OpenAI
+      'openai/gpt-4': { input: 0.03, output: 0.06 },
+      'openai/gpt-4-turbo': { input: 0.01, output: 0.03 },
+      'openai/gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
+      'openai/gpt-4o': { input: 0.005, output: 0.015 },
+      'openai/gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+      
+      // Anthropic
+      'anthropic/claude-3-opus': { input: 0.015, output: 0.075 },
+      'anthropic/claude-3-sonnet': { input: 0.003, output: 0.015 },
+      'anthropic/claude-3-haiku': { input: 0.00025, output: 0.00125 },
+      'anthropic/claude-3-5-sonnet': { input: 0.003, output: 0.015 },
+      
+      // Google
+      'google/gemini-pro': { input: 0.00025, output: 0.0005 },
+      'google/gemini-2.0-flash': { input: 0.0001, output: 0.0004 },
+      
+      // Meta
+      'meta-llama/llama-3-70b-instruct': { input: 0.0008, output: 0.0008 },
+      'meta-llama/llama-3-8b-instruct': { input: 0.00005, output: 0.00005 },
+      
+      // Qwen (Alibaba)
+      'qwen/qwen-2.5-72b-instruct': { input: 0.0004, output: 0.0008 },
+      'qwen/qwen-plus': { input: 0.0004, output: 0.0012 },
+      
+      // DeepSeek
+      'deepseek/deepseek-chat': { input: 0.00027, output: 0.0011 },
+      'deepseek/deepseek-coder': { input: 0.00027, output: 0.0011 },
+    };
+
+    const pricing = modelPricing[modelId] || { input: 0.001, output: 0.002 }; // 默认价格
+    
+    const inputCost = (usage.input || 0) / 1_000_000 * pricing.input;
+    const outputCost = (usage.output || 0) / 1_000_000 * pricing.output;
+    
+    return inputCost + outputCost;
+  }
 }
 
 export interface ContextDistributionResponse {
@@ -970,4 +1070,46 @@ export interface TokenDistribution {
     history: number;
     toolResponses: number;
   };
+}
+
+// ==================== OpenRouter Pricing Types ====================
+
+export interface OpenRouterModelPricing {
+  id: string;
+  name: string;
+  created?: number;
+  description?: string;
+  context_length?: number;
+  architecture?: {
+    modality?: string;
+    tokenizer?: string;
+    instruct_type?: string;
+  };
+  pricing?: {
+    prompt?: string;
+    completion?: string;
+    image?: string;
+    request?: string;
+    web_search?: string;
+    internal_reasoning?: string;
+    input_cache_read?: string;
+    input_cache_write?: string;
+  };
+  top_provider?: {
+    max_completion_tokens?: number;
+    is_moderated?: boolean;
+  };
+}
+
+export interface OpenRouterModelsResponse {
+  data: OpenRouterModelPricing[];
+}
+
+export interface ModelCostInfo {
+  modelId: string;
+  modelName: string;
+  promptPricePer1M: number;
+  completionPricePer1M: number;
+  contextLength?: number;
+  provider?: string;
 }

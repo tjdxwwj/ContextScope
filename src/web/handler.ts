@@ -103,6 +103,10 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
         return await handleCache(req, res, url);
       }
 
+      if (path === '/plugins/contextscope/api/pricing') {
+        return await handlePricing(req, res, url);
+      }
+
       // Dashboard 涓婚〉闈?
       if (path === '/plugins/contextscope' || path === '/plugins/contextscope/') {
         return await handleDashboard(req, res);
@@ -629,6 +633,54 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to get context distribution' }));
+      return true;
+    }
+  }
+
+  /**
+   * Handle OpenRouter pricing API request
+   * GET /plugins/contextscope/api/pricing
+   */
+  async function handlePricing(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    logger.info(`[PricingAPI] Request received: ${req.method} ${url.pathname}`);
+    
+    if (req.method !== 'GET') {
+      logger.warn(`[PricingAPI] Method not allowed: ${req.method}`);
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const refresh = url.searchParams.get('refresh') === 'true';
+      logger.info(`[PricingAPI] Fetching pricing, refresh=${refresh}`);
+      
+      const pricing = await service.getOpenRouterPricing();
+      logger.info(`[PricingAPI] Retrieved ${pricing.length} models from OpenRouter`);
+      
+      if (pricing.length === 0) {
+        logger.warn('[PricingAPI] No pricing data returned from OpenRouter');
+      } else {
+        logger.info(`[PricingAPI] First model: ${pricing[0].modelId} - $${pricing[0].promptPricePer1M}/$${pricing[0].completionPricePer1M}`);
+      }
+
+      const responseData = { 
+        pricing,
+        total: pricing.length,
+        updatedAt: new Date().toISOString()
+      };
+      
+      logger.info(`[PricingAPI] Sending response with ${responseData.total} models`);
+      
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(responseData));
+      return true;
+    } catch (error) {
+      logger.error(`[PricingAPI] Failed to get pricing: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get pricing data', message: String(error) }));
       return true;
     }
   }
