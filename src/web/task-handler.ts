@@ -31,26 +31,32 @@ export function createTaskHttpHandler(params: { service: RequestAnalyzerService;
 
         const tasks = await service.getRecentTasks(limit, sessionId, status);
 
-        // 为每个 task 计算真实的 token 统计（从 requests 表）
+        // 为每个 task 计算真实的 token 统计（直接从数据库查询）
         const tasksWithRealTokens = [];
         for (const task of tasks) {
-          const allRequests = await service.getRequests({ limit: 10000 });
-          const taskRequests = allRequests.filter(r => r.taskId === task.taskId);
-          const inputReqs = taskRequests.filter(r => r.type === 'input');
-          const outputReqs = taskRequests.filter(r => r.type === 'output');
-          
-          const realInput = inputReqs.reduce((sum, r) => sum + (r.usage?.input || 0), 0);
-          const realOutput = outputReqs.reduce((sum, r) => sum + (r.usage?.output || 0), 0);
-          
-          tasksWithRealTokens.push({
-            ...task,
-            stats: {
-              ...task.stats,
-              totalInput: realInput,
-              totalOutput: realOutput,
-              totalTokens: realInput + realOutput
-            }
-          });
+          // 使用 service 的内部 storage 直接查询
+          const storage = (service as any).storage;
+          if (storage && storage.getRequests) {
+            const allRequests = await storage.getRequests({ limit: 100000 });
+            const taskRequests = allRequests.filter((r: any) => r.taskId === task.taskId);
+            const inputReqs = taskRequests.filter((r: any) => r.type === 'input');
+            const outputReqs = taskRequests.filter((r: any) => r.type === 'output');
+            
+            const realInput = inputReqs.reduce((sum: number, r: any) => sum + (r.usage?.input || 0), 0);
+            const realOutput = outputReqs.reduce((sum: number, r: any) => sum + (r.usage?.output || 0), 0);
+            
+            tasksWithRealTokens.push({
+              ...task,
+              stats: {
+                ...task.stats,
+                totalInput: realInput,
+                totalOutput: realOutput,
+                totalTokens: realInput + realOutput
+              }
+            });
+          } else {
+            tasksWithRealTokens.push(task);
+          }
         }
 
         res.statusCode = 200;
