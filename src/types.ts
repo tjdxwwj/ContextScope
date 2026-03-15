@@ -13,17 +13,16 @@ export interface PluginLogger {
 
 export type TaskStatus = 'running' | 'completed' | 'error' | 'timeout' | 'aborted';
 
-export interface TaskStats {
-  llmCalls: number;
-  toolCalls: number;
-  subagentSpawns: number;
+// Token 统计（从 Requests 表实时聚合）
+export interface TaskTokenStats {
   totalInput: number;
   totalOutput: number;
   totalTokens: number;
   estimatedCost: number;
 }
 
-export interface TaskData {
+// Task 元数据（不包含冗余的 token 统计）
+export interface TaskMeta {
   taskId: string;
   sessionId: string;
   sessionKey?: string;
@@ -35,7 +34,10 @@ export interface TaskData {
   status: TaskStatus;
   endReason?: string;
   error?: string;
-  stats: TaskStats;
+  // 只保留计数，token 统计从 Requests 表实时聚合
+  llmCalls: number;
+  toolCalls: number;
+  subagentSpawns: number;
   runIds: string[];
   childTaskIds?: string[];
   childSessionIds?: string[];
@@ -46,6 +48,22 @@ export interface TaskData {
     messageProvider?: string;
     depth?: number;
   };
+}
+
+// TaskData 保持向后兼容，但 stats 字段标记为 deprecated
+export interface TaskData extends TaskMeta {
+  /** @deprecated 使用 TaskTokenStats 实时计算 */
+  stats?: {
+    llmCalls: number;
+    toolCalls: number;
+    subagentSpawns: number;
+    totalInput: number;
+    totalOutput: number;
+    totalTokens: number;
+    estimatedCost: number;
+  };
+  /** 实时计算的 token 统计 */
+  tokenStats?: TaskTokenStats;
 }
 
 export interface ActiveTask {
@@ -67,7 +85,7 @@ export interface ActiveTask {
 export interface TaskTreeNode {
   task: TaskData;
   children: TaskTreeNode[];
-  aggregatedStats: TaskStats & {
+  aggregatedStats: (TaskMeta & TaskTokenStats) & {
     depth: number;
     descendantCount: number;
   };

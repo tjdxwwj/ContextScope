@@ -10,6 +10,7 @@ export interface ToolCallSummary {
   timestamp: number
   startedAt?: number
   durationMs?: number
+  params?: Record<string, unknown>
   error?: string
 }
 
@@ -25,6 +26,7 @@ export interface RunTreeNode {
   requestCount: number
   model?: string
   provider?: string
+  assistantTexts?: string[]
   status: 'running' | 'success' | 'error' | 'unknown'
   children: RunTreeNode[]
   toolCalls: ToolCallSummary[]
@@ -42,6 +44,7 @@ function aggregateRunFromRequests(requests: RequestData[]): Omit<RunTreeNode, 'c
   let hasError = false
   let model: string | undefined
   let provider: string | undefined
+  const assistantTexts: string[] = []
   for (const r of requests) {
     const u = r.usage
     // 注意：OpenClaw 可能不传递 input tokens，需要从 total 推算
@@ -61,6 +64,9 @@ function aggregateRunFromRequests(requests: RequestData[]): Omit<RunTreeNode, 'c
     if ((r as RequestData & { error?: string }).error) hasError = true
     if (r.model) model = r.model
     if (r.provider) provider = r.provider
+    if (r.type === 'output' && Array.isArray(r.assistantTexts) && r.assistantTexts.length > 0) {
+      assistantTexts.push(...r.assistantTexts)
+    }
   }
   if (total === 0 && (input > 0 || output > 0)) total = input + output
   let usageEstimated = false
@@ -92,6 +98,7 @@ function aggregateRunFromRequests(requests: RequestData[]): Omit<RunTreeNode, 'c
     requestCount: requests.length,
     model,
     provider,
+    assistantTexts: assistantTexts.length > 0 ? assistantTexts : undefined,
     status,
   }
 }
@@ -173,6 +180,7 @@ export function buildRunTree(raw: RawStore): RunTreeNode[] {
       timestamp: t.timestamp,
       startedAt: t.startedAt,
       durationMs: t.durationMs,
+      params: t.params,
       error: t.error,
     }
   }

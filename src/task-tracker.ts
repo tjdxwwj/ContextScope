@@ -6,7 +6,7 @@
  */
 
 import type { RequestAnalyzerStorage } from './storage.js';
-import type { TaskData, TaskStats, TaskStatus } from './types.js';
+import type { TaskMeta, TaskStatus } from './types.js';
 
 export interface TaskTrackerOptions {
   taskTimeoutMs?: number;        // Default: 10 minutes
@@ -42,7 +42,7 @@ export class TaskTracker {
     sessionKey?: string,
     parentTaskId?: string,
     parentSessionId?: string,
-    metadata?: Partial<TaskData['metadata']>
+    metadata?: any
   ): Promise<string> {
     // Query storage for existing unfinished task
     const existingTask = await this.storage.getTaskBySessionId(sessionId);
@@ -54,7 +54,7 @@ export class TaskTracker {
     
     // Create new task
     const taskId = `task_${Date.now()}_${sessionId.split('-')[0]}`;
-    const taskData: TaskData = {
+    const taskData: TaskMeta = {
       taskId,
       sessionId,
       sessionKey,
@@ -62,15 +62,9 @@ export class TaskTracker {
       parentSessionId,
       startTime: Date.now(),
       status: 'running',
-      stats: {
-        llmCalls: 0,
-        toolCalls: 0,
-        subagentSpawns: 0,
-        totalInput: 0,
-        totalOutput: 0,
-        totalTokens: 0,
-        estimatedCost: 0
-      },
+      llmCalls: 0,
+      toolCalls: 0,
+      subagentSpawns: 0,
       runIds: [],
       metadata: { 
         ...metadata, 
@@ -90,27 +84,23 @@ export class TaskTracker {
    * Record LLM call
    * @returns The updated task
    */
-  async recordLLMCall(sessionId: string, runId: string, input: number, output: number): Promise<TaskData | null> {
+  async recordLLMCall(sessionId: string, runId: string, input: number, output: number): Promise<TaskMeta | null> {
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (!task) {
       this.logWarn?.(`LLM call without active task for session ${sessionId}`);
       return null;
     }
     
-    // Update task stats (直接修改引用对象，因为 getTaskBySessionId 返回的是内存中的引用)
-    task.stats.llmCalls++;
-    task.stats.totalInput += input;
-    task.stats.totalOutput += output;
-    task.stats.totalTokens = task.stats.totalInput + task.stats.totalOutput;
-    task.stats.estimatedCost = this.estimateCost(task.stats.totalInput, task.stats.totalOutput);
+    // 只更新计数，token 统计从 Requests 表实时聚合
+    task.llmCalls++;
     
     if (!task.runIds.includes(runId)) {
       task.runIds.push(runId);
     }
     
-    this.logDebug?.(`Task ${task.taskId}: LLM call #${task.stats.llmCalls} (${input} in, ${output} out) | Total Output: ${task.stats.totalOutput}`);
+    this.logDebug?.(`Task ${task.taskId}: LLM call #${task.llmCalls} (${input} in, ${output} out)`);
     
-    // Persist update - 直接保存修改后的 task 对象
+    // Persist update
     await this.storage.captureTask(task);
     
     return task;
@@ -122,7 +112,7 @@ export class TaskTracker {
   async recordToolCall(sessionId: string): Promise<void> {
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (task) {
-      task.stats.toolCalls++;
+      task.toolCalls++;
       await this.storage.captureTask(task);
     }
   }
@@ -135,7 +125,7 @@ export class TaskTracker {
     // Query for the task with this sessionId (could be parent or child)
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (task) {
-      task.stats.subagentSpawns++;
+      task.subagentSpawns++;
       await this.storage.captureTask(task);
     }
   }
@@ -147,7 +137,7 @@ export class TaskTracker {
     sessionId: string,
     reason: 'completed' | 'error' | 'timeout' | 'aborted' = 'completed',
     error?: string
-  ): Promise<TaskData | null> {
+  ): Promise<TaskMeta | null> {
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (!task) {
       this.logWarn?.(`Ending task without active task for session ${sessionId}`);
@@ -177,7 +167,7 @@ export class TaskTracker {
               parentTask.childTaskIds = [];
             }
             parentTask.childTaskIds.push(task.taskId);
-            parentTask.stats.subagentSpawns = (parentTask.stats.subagentSpawns || 0) + 1;
+            parentTask.subagentSpawns = (parentTask.subagentSpawns || 0) + 1;
             await this.storage.captureTask(parentTask);
             this.logDebug?.(`Linked child task ${task.taskId} to parent ${parentTask.taskId} via SubagentLink`);
           }
@@ -195,10 +185,9 @@ export class TaskTracker {
     
     this.logInfo(
       `Task ${task.taskId}${childNote} ended: ` +
-      `${task.stats.llmCalls} LLM calls, ` +
-      `${task.stats.toolCalls} tool calls, ` +
-      `${task.stats.subagentSpawns} subagents, ` +
-      `${task.stats.totalTokens} tokens`
+      `${task.llmCalls} LLM calls, ` +
+      `${task.toolCalls} tool calls, ` +
+      `${task.subagentSpawns} subagents`
     );
     
     return task;
@@ -215,16 +204,6 @@ export class TaskTracker {
       case 'aborted': return 'aborted';
       default: return 'completed';
     }
-  }
-
-  /**
-   * Estimate cost based on input/output tokens
-   * Uses average pricing: $0.001/1K input, $0.003/1K output
-   */
-  private estimateCost(inputTokens: number, outputTokens: number): number {
-    const inputCost = (inputTokens / 1_000_000) * 1;  // $1 per 1M input
-    const outputCost = (outputTokens / 1_000_000) * 3; // $3 per 1M output
-    return inputCost + outputCost;
   }
 
   /**

@@ -148,42 +148,103 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
     const requestSeq = ++requestSeqRef.current
     const controller = new AbortController()
     let debounceTimer: number | null = null
-    setSelectedSection(null) // Reset selection when runId changes
+    setSelectedSection(null)
+    console.log('[ContextDistribution]', 'effect start', {
+      runId,
+      requestSeq,
+      latestRequestSeq: requestSeqRef.current,
+    })
 
     async function load() {
       if (!runId) {
+        console.log('[ContextDistribution]', 'skip load because runId empty', {
+          requestSeq,
+        })
         setData(null)
         setLoadError(null)
         setLoading(false)
         return
       }
+      console.log('[ContextDistribution]', 'load start', {
+        runId,
+        requestSeq,
+      })
       setLoading(true)
       setLoadError(null)
       try {
         const res = await fetchContext(runId, { signal: controller.signal, timeoutMs: 12000 })
-        if (requestSeq !== requestSeqRef.current) return
+        if (requestSeq !== requestSeqRef.current) {
+          console.warn('[ContextDistribution]', 'ignore stale result by requestSeq mismatch', {
+            runId,
+            requestSeq,
+            latestRequestSeq: requestSeqRef.current,
+          })
+          return
+        }
         if (res) {
+          console.log('[ContextDistribution]', 'load success', {
+            runId,
+            requestSeq,
+            tokenTotal: res.tokenDistribution?.total ?? null,
+          })
           setData(res)
           setLoadError(null)
         } else {
+          console.warn('[ContextDistribution]', 'load got empty result', {
+            runId,
+            requestSeq,
+          })
           setData(null)
           setLoadError('上下文分析接口暂无数据或请求超时')
         }
       } catch (e) {
-        if (requestSeq !== requestSeqRef.current) return
-        if (e instanceof DOMException && e.name === 'AbortError') return
+        if (requestSeq !== requestSeqRef.current) {
+          console.warn('[ContextDistribution]', 'ignore stale error by requestSeq mismatch', {
+            runId,
+            requestSeq,
+            latestRequestSeq: requestSeqRef.current,
+            error: e,
+          })
+          return
+        }
+        if (e instanceof DOMException && e.name === 'AbortError') {
+          console.log('[ContextDistribution]', 'load aborted', {
+            runId,
+            requestSeq,
+          })
+          return
+        }
+        console.error('[ContextDistribution] load failed', {
+          runId,
+          requestSeq,
+          error: e,
+        })
         setData(null)
         setLoadError('上下文分析加载失败')
       } finally {
-        if (requestSeq === requestSeqRef.current) setLoading(false)
+        if (requestSeq === requestSeqRef.current) {
+          setLoading(false)
+          console.log('[ContextDistribution]', 'load finish', {
+            runId,
+            requestSeq,
+          })
+        }
       }
     }
 
     debounceTimer = window.setTimeout(() => {
+      console.log('[ContextDistribution]', 'debounce trigger load', {
+        runId,
+        requestSeq,
+      })
       void load()
     }, 120)
     return () => {
       if (debounceTimer != null) window.clearTimeout(debounceTimer)
+      console.log('[ContextDistribution]', 'effect cleanup and abort', {
+        runId,
+        requestSeq,
+      })
       controller.abort()
     }
   }, [runId])

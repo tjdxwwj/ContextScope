@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import type { PluginLogger, TaskData, TaskStats, TaskTreeNode } from './types.js';
+import type { PluginLogger, TaskMeta, TaskTokenStats, TaskTreeNode } from './types.js';
 
 export interface RequestData {
   id?: number;
@@ -670,7 +670,7 @@ export class RequestAnalyzerStorage {
   /**
    * Capture task data
    */
-  async captureTask(data: TaskData): Promise<void> {
+  async captureTask(data: TaskMeta): Promise<void> {
     if (!this.initialized) await this.initialize();
 
     try {
@@ -678,15 +678,9 @@ export class RequestAnalyzerStorage {
       const existingIndex = this.tasks.findIndex(t => t.taskId === data.taskId);
 
       if (existingIndex >= 0) {
-        // Update existing task - 使用深拷贝合并 stats，避免覆盖累加值
-        const existingTask = this.tasks[existingIndex];
-        this.tasks[existingIndex] = {
-          ...existingTask,
-          ...data,
-          // 关键修复：stats 使用深拷贝合并，保留累加的 token 数
-          stats: { ...existingTask.stats, ...data.stats }
-        };
-        this.options.logger.debug?.(`Updated task ${data.taskId} | Output: ${this.tasks[existingIndex].stats.totalOutput}`);
+        // Update existing task
+        this.tasks[existingIndex] = { ...this.tasks[existingIndex], ...data };
+        this.options.logger.debug?.(`Updated task ${data.taskId}`);
       } else {
         // Add new task
         this.tasks.unshift(data);
