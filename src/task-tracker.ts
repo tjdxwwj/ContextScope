@@ -88,15 +88,16 @@ export class TaskTracker {
 
   /**
    * Record LLM call
+   * @returns The updated task
    */
-  async recordLLMCall(sessionId: string, runId: string, input: number, output: number): Promise<void> {
+  async recordLLMCall(sessionId: string, runId: string, input: number, output: number): Promise<TaskData | null> {
     const task = await this.storage.getTaskBySessionId(sessionId);
     if (!task) {
       this.logWarn?.(`LLM call without active task for session ${sessionId}`);
-      return;
+      return null;
     }
     
-    // Update task stats
+    // Update task stats (直接修改引用对象，因为 getTaskBySessionId 返回的是内存中的引用)
     task.stats.llmCalls++;
     task.stats.totalInput += input;
     task.stats.totalOutput += output;
@@ -107,10 +108,12 @@ export class TaskTracker {
       task.runIds.push(runId);
     }
     
-    // Persist update
+    this.logDebug?.(`Task ${task.taskId}: LLM call #${task.stats.llmCalls} (${input} in, ${output} out) | Total Output: ${task.stats.totalOutput}`);
+    
+    // Persist update - 直接保存修改后的 task 对象
     await this.storage.captureTask(task);
     
-    this.logDebug?.(`Task ${task.taskId}: LLM call #${task.stats.llmCalls} (${input} in, ${output} out)`);
+    return task;
   }
 
   /**

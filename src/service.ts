@@ -919,23 +919,45 @@ export class RequestAnalyzerService {
 
   // ==================== OpenRouter Pricing Methods ====================
 
+  // OpenRouter 价格缓存
+  private pricingCache: {
+    data: ModelCostInfo[];
+    timestamp: number;
+    ttl: number; // 缓存有效期（毫秒）
+  } | null = null;
+
   /**
    * 获取 OpenRouter 模型价格列表
-   * 从 OpenRouter API 获取当日模型价格
+   * 从 OpenRouter API 获取实时模型价格，带缓存机制
    */
-  async getOpenRouterPricing(): Promise<ModelCostInfo[]> {
+  async getOpenRouterPricing(forceRefresh = false): Promise<ModelCostInfo[]> {
+    const now = Date.now();
+    
+    // 检查缓存是否有效
+    if (!forceRefresh && this.pricingCache && (now - this.pricingCache.timestamp) < this.pricingCache.ttl) {
+      this.logger.debug?.(`Using cached pricing data (${this.pricingCache.data.length} models, ${Math.round((now - this.pricingCache.timestamp) / 1000)}s old)`);
+      return this.pricingCache.data;
+    }
+    
     try {
+      this.logger.info?.(`Fetching pricing from OpenRouter API (forceRefresh=${forceRefresh})...`);
+      
       const response = await fetch('https://openrouter.ai/api/v1/models', {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
         },
-        // 5 秒超时
-        signal: AbortSignal.timeout(5000)
+        // 10 秒超时（增加超时时间）
+        signal: AbortSignal.timeout(10000)
       });
 
       if (!response.ok) {
         this.logger.warn(`OpenRouter API returned ${response.status}`);
+        // 如果有缓存，返回缓存数据
+        if (this.pricingCache) {
+          this.logger.info?.('Returning cached pricing data due to API error');
+          return this.pricingCache.data;
+        }
         return [];
       }
 
@@ -961,10 +983,22 @@ export class RequestAnalyzerService {
       // 按模型名称排序
       pricingInfo.sort((a, b) => a.modelName.localeCompare(b.modelName));
 
-      this.logger.info?.(`Fetched ${pricingInfo.length} models from OpenRouter pricing API`);
+      // 更新缓存（有效期 30 分钟）
+      this.pricingCache = {
+        data: pricingInfo,
+        timestamp: now,
+        ttl: 30 * 60 * 1000 // 30 minutes
+      };
+
+      this.logger.info?.(`Fetched ${pricingInfo.length} models from OpenRouter pricing API, cached for 30min`);
       return pricingInfo;
     } catch (error) {
       this.logger.error(`Failed to fetch OpenRouter pricing: ${error}`);
+      // 如果有缓存，返回缓存数据
+      if (this.pricingCache) {
+        this.logger.info?.('Returning cached pricing data due to error');
+        return this.pricingCache.data;
+      }
       return [];
     }
   }

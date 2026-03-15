@@ -32,11 +32,15 @@ export function PricingTable() {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [lastUpdated, setLastUpdated] = useState<string>('')
 
-  const fetchPricing = async () => {
+  const fetchPricing = async (forceRefresh = false) => {
     console.log('====== [PricingTable] Fetch start ======')
     try {
-      console.log('[PricingTable] 1. Fetching from /plugins/contextscope/api/pricing')
-      const res = await fetch('/plugins/contextscope/api/pricing')
+      const url = forceRefresh 
+        ? '/plugins/contextscope/api/pricing?refresh=true'
+        : '/plugins/contextscope/api/pricing'
+      
+      console.log('[PricingTable] 1. Fetching from', url)
+      const res = await fetch(url)
       console.log('[PricingTable] 2. Response received, status:', res.status, 'ok:', res.ok)
       
       if (!res.ok) {
@@ -177,10 +181,10 @@ export function PricingTable() {
         
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchPricing}
+            onClick={() => fetchPricing(true)}
             disabled={loading}
             className="p-2 hover:bg-slate-200 rounded-lg transition-colors disabled:opacity-50"
-            title="刷新价格"
+            title="刷新价格（强制从 OpenRouter 获取）"
           >
             <RefreshCw className={cn('w-4 h-4 text-slate-600', loading && 'animate-spin')} />
           </button>

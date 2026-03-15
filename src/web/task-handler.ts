@@ -31,12 +31,34 @@ export function createTaskHttpHandler(params: { service: RequestAnalyzerService;
 
         const tasks = await service.getRecentTasks(limit, sessionId, status);
 
+        // 为每个 task 计算真实的 token 统计（从 requests 表）
+        const tasksWithRealTokens = [];
+        for (const task of tasks) {
+          const allRequests = await service.getRequests({ limit: 10000 });
+          const taskRequests = allRequests.filter(r => r.taskId === task.taskId);
+          const inputReqs = taskRequests.filter(r => r.type === 'input');
+          const outputReqs = taskRequests.filter(r => r.type === 'output');
+          
+          const realInput = inputReqs.reduce((sum, r) => sum + (r.usage?.input || 0), 0);
+          const realOutput = outputReqs.reduce((sum, r) => sum + (r.usage?.output || 0), 0);
+          
+          tasksWithRealTokens.push({
+            ...task,
+            stats: {
+              ...task.stats,
+              totalInput: realInput,
+              totalOutput: realOutput,
+              totalTokens: realInput + realOutput
+            }
+          });
+        }
+
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({
           success: true,
           data: {
-            tasks,
+            tasks: tasksWithRealTokens,
             pagination: {
               limit,
               offset,

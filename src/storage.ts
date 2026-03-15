@@ -304,12 +304,39 @@ export class RequestAnalyzerStorage {
 
   private async initializeSqlite(): Promise<void> {
     try {
-      const dynamicImport = new Function('moduleName', 'return import(moduleName)') as (moduleName: string) => Promise<unknown>;
-      const sqliteModule = await dynamicImport('node:sqlite');
-      const DatabaseSync = (sqliteModule as any).DatabaseSync;
-      if (!DatabaseSync) return;
+      this.options.logger.info?.('Initializing SQLite...');
+      
+      // 尝试使用 require 加载 node:sqlite (适用于 OpenClaw 环境)
+      let DatabaseSync: any;
+      try {
+        // 先尝试动态导入
+        // @ts-ignore - node:sqlite is available in Node 22+
+        const sqliteModule = await import('node:sqlite');
+        DatabaseSync = (sqliteModule as any).DatabaseSync;
+      } catch (importError) {
+        this.options.logger.warn?.(`SQLite import failed: ${importError}`);
+        // 如果动态导入失败，尝试 require
+        try {
+          const { createRequire } = await import('module');
+          const require = createRequire(import.meta.url);
+          // @ts-ignore - node:sqlite is available in Node 22+
+          const sqliteModule = require('node:sqlite');
+          DatabaseSync = sqliteModule.DatabaseSync;
+        } catch (requireError) {
+          this.options.logger.warn?.(`SQLite require failed: ${requireError}`);
+          return;
+        }
+      }
+      
+      if (!DatabaseSync) {
+        this.options.logger.warn?.('SQLite DatabaseSync not available');
+        return;
+      }
+      
       const dbFile = path.join(this.options.workspaceDir, 'contextscope.db');
+      this.options.logger.info?.(`Creating SQLite database at: ${dbFile}`);
       const db = new DatabaseSync(dbFile);
+      this.options.logger.info?.('SQLite database created successfully');
       db.exec(`
         PRAGMA journal_mode=WAL;
         PRAGMA synchronous=NORMAL;
@@ -372,6 +399,31 @@ export class RequestAnalyzerStorage {
         CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_run_ts ON subagent_links(parent_run_id, timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_subagent_links_child_run_ts ON subagent_links(child_run_id, timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_session_ts ON subagent_links(parent_session_id, timestamp DESC);
+        CREATE TABLE IF NOT EXISTS tasks (
+          task_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          session_key TEXT,
+          parent_task_id TEXT,
+          parent_session_id TEXT,
+          start_time INTEGER NOT NULL,
+          end_time INTEGER,
+          duration INTEGER,
+          status TEXT,
+          end_reason TEXT,
+          error TEXT,
+          llm_calls INTEGER DEFAULT 0,
+          tool_calls INTEGER DEFAULT 0,
+          subagent_spawns INTEGER DEFAULT 0,
+          total_input INTEGER DEFAULT 0,
+          total_output INTEGER DEFAULT 0,
+          total_tokens INTEGER DEFAULT 0,
+          estimated_cost REAL DEFAULT 0,
+          run_ids_json TEXT,
+          child_task_ids_json TEXT,
+          metadata_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_session_ts ON tasks(session_id, start_time DESC);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       `);
       this.sqliteDb = db;
       this.sqliteEnabled = true;
@@ -448,6 +500,41 @@ export class RequestAnalyzerStorage {
         this.toJson(data.params),
         this.toJson(data.result),
         data.error ?? null,
+        this.toJson(data.metadata)
+      );
+  }
+
+  private sqliteUpsertTask(data: TaskData): void {
+    if (!this.sqliteEnabled || !this.sqliteDb) return;
+    this.sqliteDb
+      .prepare(`INSERT OR REPLACE INTO tasks (
+        task_id, session_id, session_key, parent_task_id, parent_session_id,
+        start_time, end_time, duration, status, end_reason, error,
+        llm_calls, tool_calls, subagent_spawns,
+        total_input, total_output, total_tokens, estimated_cost,
+        run_ids_json, child_task_ids_json, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        data.taskId,
+        data.sessionId,
+        data.sessionKey ?? null,
+        data.parentTaskId ?? null,
+        data.parentSessionId ?? null,
+        data.startTime,
+        data.endTime ?? null,
+        data.duration ?? null,
+        data.status ?? null,
+        data.endReason ?? null,
+        data.error ?? null,
+        data.stats?.llmCalls ?? 0,
+        data.stats?.toolCalls ?? 0,
+        data.stats?.subagentSpawns ?? 0,
+        data.stats?.totalInput ?? 0,
+        data.stats?.totalOutput ?? 0,
+        data.stats?.totalTokens ?? 0,
+        data.stats?.estimatedCost ?? 0,
+        this.toJson(data.runIds),
+        this.toJson(data.childTaskIds),
         this.toJson(data.metadata)
       );
   }
@@ -587,17 +674,28 @@ export class RequestAnalyzerStorage {
     if (!this.initialized) await this.initialize();
 
     try {
-      // Check if task already exists
+      // Check if task already exists in memory
       const existingIndex = this.tasks.findIndex(t => t.taskId === data.taskId);
 
       if (existingIndex >= 0) {
-        // Update existing task
-        this.tasks[existingIndex] = { ...this.tasks[existingIndex], ...data };
-        this.options.logger.debug?.(`Updated task ${data.taskId}`);
+        // Update existing task - 使用深拷贝合并 stats，避免覆盖累加值
+        const existingTask = this.tasks[existingIndex];
+        this.tasks[existingIndex] = {
+          ...existingTask,
+          ...data,
+          // 关键修复：stats 使用深拷贝合并，保留累加的 token 数
+          stats: { ...existingTask.stats, ...data.stats }
+        };
+        this.options.logger.debug?.(`Updated task ${data.taskId} | Output: ${this.tasks[existingIndex].stats.totalOutput}`);
       } else {
         // Add new task
         this.tasks.unshift(data);
         this.options.logger.debug?.(`Captured new task ${data.taskId}`);
+      }
+
+      // 如果 SQLite 已启用，立即写入数据库
+      if (this.sqliteEnabled && this.sqliteDb) {
+        this.sqliteUpsertTask(data);
       }
 
       this.cleanupOldRequests();

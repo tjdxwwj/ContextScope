@@ -655,7 +655,7 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       const refresh = url.searchParams.get('refresh') === 'true';
       logger.info(`[PricingAPI] Fetching pricing, refresh=${refresh}`);
       
-      const pricing = await service.getOpenRouterPricing();
+      const pricing = await service.getOpenRouterPricing(refresh);
       logger.info(`[PricingAPI] Retrieved ${pricing.length} models from OpenRouter`);
       
       if (pricing.length === 0) {

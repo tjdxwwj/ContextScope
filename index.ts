@@ -182,17 +182,25 @@ const plugin = {
             };
         
         // 记录到任务追踪器
-        api.logger.debug?.(`[TaskTracker] recordLLMCall: input=${inputTokens}, output=${outputTokens}`);
-        await taskTracker.recordLLMCall(
+        // 先记录到 TaskTracker 获取最新的 task
+        const task = await taskTracker.recordLLMCall(
           event.sessionId,
           event.runId,
           inputTokens,
           outputTokens
         );
         
+        api.logger.info?.(`[TaskTracker] recordLLMCall: sessionId=${event.sessionId}, taskId=${task?.taskId || 'NULL'}, runId=${event.runId}, input=${inputTokens}, output=${outputTokens}`);
+        
+        // 如果 outputTokens 为 0 但 rawUsage 有值，记录警告
+        if (outputTokens === 0 && rawUsage) {
+          api.logger.warn?.(`[TaskTracker] Output tokens is 0 but rawUsage exists: ${JSON.stringify(rawUsage)}`);
+        }
+        
         await service.captureResponse({
           type: 'output',
           runId: event.runId,
+          taskId: task?.taskId,  // ← 新增：传递 taskId
           sessionId: event.sessionId,
           sessionKey: ctx.sessionKey,
           provider: event.provider,

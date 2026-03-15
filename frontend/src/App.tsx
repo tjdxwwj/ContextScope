@@ -47,6 +47,12 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+interface ChainToolCallSummary extends ToolCallSummary {
+  runId: string
+  result?: string
+  status?: 'success' | 'error' | 'pending'
+}
+
 const formatTime = (ts: number) =>
   new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
 const formatFullTime = (ts: number) =>
@@ -54,17 +60,49 @@ const formatFullTime = (ts: number) =>
 const logRunListDebug = (event: string, payload: Record<string, unknown> = {}) => {
   console.log(`[RunListDebug] ${event}`, payload)
 }
-const mapToolCallsFromChain = (chainData: ChainResponse): ToolCallSummary[] => {
+const asParamsRecord = (value: unknown): Record<string, unknown> | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+const extractOutputTextFromItem = (item: ChainResponse['chain'][number]): string => {
+  const text = item.output?.text?.trim()
+  if (text) return text
+  const assistantTexts = (item.output?.assistantTexts ?? [])
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n')
+  if (assistantTexts) return assistantTexts
+  const result = normalizeLlmOutput(item.output?.result)
+  if (result) return result
+  const outcome = item.output?.outcome?.trim()
+  if (outcome) return outcome
+  return ''
+}
+const extractLatestLlmOutputFromChain = (
+  chainData: ChainResponse
+): { text: string; timestamp: number } | null => {
+  const items = [...chainData.chain].sort((a, b) => b.timestamp - a.timestamp)
+  for (const item of items) {
+    if (item.type !== 'output') continue
+    const text = extractOutputTextFromItem(item)
+    if (text) return { text, timestamp: item.timestamp }
+  }
+  return null
+}
+const mapToolCallsFromChain = (chainData: ChainResponse): ChainToolCallSummary[] => {
   const items = [...chainData.chain].sort((a, b) => a.timestamp - b.timestamp)
-  const calls = new Map<string, ToolCallSummary>()
+  const calls = new Map<string, ChainToolCallSummary>()
   for (const item of items) {
     if (item.type === 'tool_call') {
       const key = item.id || `${item.timestamp}-${item.metadata?.toolName || 'tool'}`
       calls.set(key, {
+        runId: item.runId,
         toolName: item.metadata?.toolName || 'Unknown Tool',
         toolCallId: item.id,
         timestamp: item.timestamp,
         durationMs: item.duration,
+        params: asParamsRecord(item.input?.params),
+        status: item.metadata?.status,
         error:
           item.metadata?.status === 'error'
             ? item.metadata.error || 'Tool call failed'
@@ -75,11 +113,29 @@ const mapToolCallsFromChain = (chainData: ChainResponse): ToolCallSummary[] => {
     if (item.type === 'tool_result') {
       const key = item.id
       const found = key ? calls.get(key) : undefined
+      const resultText = extractOutputTextFromItem(item)
       if (found) {
         if (item.duration != null) found.durationMs = item.duration
+        if (resultText) found.result = resultText
+        if (item.metadata?.status) found.status = item.metadata.status
         if (item.metadata?.status === 'error') {
           found.error = item.metadata.error || found.error || 'Tool call failed'
         }
+      } else {
+        const fallbackKey = key || `${item.runId}-${item.timestamp}-result`
+        calls.set(fallbackKey, {
+          runId: item.runId,
+          toolName: item.metadata?.toolName || 'Unknown Tool',
+          toolCallId: key,
+          timestamp: item.timestamp,
+          durationMs: item.duration,
+          status: item.metadata?.status,
+          result: resultText || undefined,
+          error:
+            item.metadata?.status === 'error'
+              ? item.metadata.error || 'Tool call failed'
+              : undefined,
+        })
       }
     }
   }
@@ -141,24 +197,6 @@ const normalizeLlmOutput = (value: unknown): string => {
   } catch {
     return String(value)
   }
-}
-const extractLlmOutputFromChain = (chainData: ChainResponse): string => {
-  const items = [...chainData.chain].sort((a, b) => b.timestamp - a.timestamp)
-  for (const item of items) {
-    if (item.type !== 'output') continue
-    const text = item.output?.text?.trim()
-    if (text) return text
-    const assistantTexts = (item.output?.assistantTexts ?? [])
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0)
-      .join('\n')
-    if (assistantTexts) return assistantTexts
-    const result = normalizeLlmOutput(item.output?.result)
-    if (result) return result
-    const outcome = item.output?.outcome?.trim()
-    if (outcome) return outcome
-  }
-  return ''
 }
 const buildRunTreeSignature = (tree: RunTreeNode[]): string =>
   tree
@@ -304,6 +342,7 @@ interface RunListItemProps {
   onSelect: (node: RunTreeNode) => void
   isLast?: boolean
   parentIsLast?: boolean[]
+  pricingLoaded?: boolean  // 价格数据是否已加载
 }
 
 const RunListItem = ({
@@ -312,6 +351,7 @@ const RunListItem = ({
   selectedId,
   onSelect,
   isLast = true,
+  pricingLoaded = false,
   parentIsLast = [],
 }: RunListItemProps) => {
   const isSelected = selectedId === node.runId
@@ -472,6 +512,7 @@ const RunListItem = ({
               onSelect={onSelect}
               isLast={idx === node.children.length - 1}
               parentIsLast={[...parentIsLast, isLast]}
+              pricingLoaded={pricingLoaded}
             />
           ))}
         </div>
@@ -1084,12 +1125,12 @@ const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
 // --- 全局总览：执行时间线 + 统计 ---
 interface TimelineEvent {
   id: string
-  type: 'run' | 'tool'
+  type: 'run' | 'tool' | 'input' | 'output'
   startTime: number
   endTime: number
   label: string
   level: number
-  data: RunTreeNode | { toolName: string; timestamp: number; durationMs?: number }
+  data: RunTreeNode | { toolName: string; timestamp: number; durationMs?: number } | { inputTokens: number; outputTokens: number; model?: string }
 }
 
 const GlobalOverview = ({
@@ -1105,6 +1146,7 @@ const GlobalOverview = ({
   const allEvents = useMemo(() => {
     const events: TimelineEvent[] = []
     const processNode = (node: RunTreeNode, level: number) => {
+      // Run 事件
       events.push({
         id: node.runId,
         type: 'run',
@@ -1114,6 +1156,34 @@ const GlobalOverview = ({
         level,
         data: node,
       })
+      
+      // Input 事件
+      if (node.usage.input > 0) {
+        events.push({
+          id: `${node.runId}-input`,
+          type: 'input',
+          startTime: node.startTime,
+          endTime: node.startTime + 1000,
+          label: `IN ${node.usage.input.toLocaleString()}`,
+          level: level + 0.5,
+          data: { inputTokens: node.usage.input, outputTokens: 0, model: node.model },
+        })
+      }
+      
+      // Output 事件
+      if (node.usage.output > 0) {
+        events.push({
+          id: `${node.runId}-output`,
+          type: 'output',
+          startTime: node.endTime - 1000,
+          endTime: node.endTime,
+          label: `OUT ${node.usage.output.toLocaleString()}`,
+          level: level + 0.5,
+          data: { inputTokens: 0, outputTokens: node.usage.output, model: node.model },
+        })
+      }
+      
+      // Tool Calls 事件
       node.toolCalls.forEach((tool) => {
         events.push({
           id: tool.toolCallId ?? `${tool.timestamp}`,
@@ -1125,6 +1195,7 @@ const GlobalOverview = ({
           data: tool,
         })
       })
+      
       node.children.forEach((child) => processNode(child, level + 1))
     }
     runs.forEach((run) => processNode(run, 0))
@@ -1222,7 +1293,12 @@ const GlobalOverview = ({
       .attr('width', (d) => Math.max(2, x(d.endTime) - x(d.startTime)))
       .attr('height', 24)
       .attr('rx', 6)
-      .attr('fill', (d) => (d.type === 'run' ? '#3b82f6' : '#f59e0b'))
+      .attr('fill', (d) => {
+        if (d.type === 'run') return '#3b82f6'
+        if (d.type === 'input') return '#10b981'
+        if (d.type === 'output') return '#f59e0b'
+        return '#8b5cf6'
+      })
       .attr('opacity', 0.8)
       .attr('class', 'transition-opacity')
     bars
@@ -1400,11 +1476,16 @@ const GlobalOverview = ({
                   <div
                     className={cn(
                       'w-2 h-2 rounded-full',
-                      selectedEvent.type === 'run' ? 'bg-blue-500' : 'bg-amber-500'
+                      selectedEvent.type === 'run' ? 'bg-blue-500' :
+                      selectedEvent.type === 'input' ? 'bg-emerald-500' :
+                      selectedEvent.type === 'output' ? 'bg-amber-500' :
+                      'bg-purple-500'
                     )}
                   />
                   <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                    {selectedEvent.type}
+                    {selectedEvent.type === 'input' ? 'Input' :
+                     selectedEvent.type === 'output' ? 'Output' :
+                     selectedEvent.type}
                   </span>
                 </div>
                 <button
@@ -1418,6 +1499,10 @@ const GlobalOverview = ({
               <h4 className="mono text-sm font-bold text-slate-800 mb-4 truncate">
                 {selectedEvent.type === 'run'
                   ? (selectedEvent.data as RunTreeNode).runId
+                  : selectedEvent.type === 'input'
+                  ? `Input: ${(selectedEvent.data as any).inputTokens?.toLocaleString()} tokens`
+                  : selectedEvent.type === 'output'
+                  ? `Output: ${(selectedEvent.data as any).outputTokens?.toLocaleString()} tokens`
                   : (selectedEvent.data as { toolName: string }).toolName}
               </h4>
               <div className="space-y-3">
@@ -1531,7 +1616,8 @@ export default function App() {
   const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>({})
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [isClearingCache, setIsClearingCache] = useState(false)
-  const [selectedRunChainToolCalls, setSelectedRunChainToolCalls] = useState<ToolCallSummary[] | null>(null)
+  const [selectedRunChainToolCalls, setSelectedRunChainToolCalls] = useState<ChainToolCallSummary[] | null>(null)
+  const [selectedTaskToolCalls, setSelectedTaskToolCalls] = useState<ChainToolCallSummary[] | null>(null)
   
   // 价格加载状态
   const [pricingLoaded, setPricingLoaded] = useState(false)
@@ -1629,10 +1715,11 @@ export default function App() {
   }, [selectedTask, roots])
 
   useEffect(() => {
-    let canceled = false
+    const controller = new AbortController()
     if (!selectedTask || selectedTask.runIds.length === 0) {
       setSelectedTaskUserPrompt(null)
       setSelectedTaskLlmOutput(null)
+      setSelectedTaskToolCalls(null)
       setTaskPromptLoading(false)
       return
     }
@@ -1642,38 +1729,50 @@ export default function App() {
     setTaskPromptLoading(true)
     setSelectedTaskUserPrompt(null)
     setSelectedTaskLlmOutput(null)
+    setSelectedTaskToolCalls(null)
 
     ;(async () => {
       let foundPrompt: string | null = null
-      let foundOutput: string | null = null
-      for (const runId of runCandidates) {
-        const chainData = await fetchChain(runId)
-        if (!chainData) continue
-        if (!foundPrompt) {
-          const promptItem = [...chainData.chain]
-            .sort((a, b) => a.timestamp - b.timestamp)
-            .find(
-              (item) =>
-                item.type === 'input' &&
-                ((item.input?.prompt && item.input.prompt.trim().length > 0) ||
-                  (item.input?.task && item.input.task.trim().length > 0))
-            )
-          const promptText = promptItem?.input?.prompt?.trim() || promptItem?.input?.task?.trim()
-          if (promptText) foundPrompt = extractUserTaskFromPrompt(promptText)
+      let latestOutput: { text: string; timestamp: number } | null = null
+      const allToolCalls: ChainToolCallSummary[] = []
+      try {
+        for (const runId of runCandidates) {
+          if (controller.signal.aborted) break
+          const chainData = await fetchChain(runId, { signal: controller.signal, timeoutMs: 12000 })
+          if (!chainData) continue
+          allToolCalls.push(...mapToolCallsFromChain(chainData))
+          if (!foundPrompt) {
+            const promptItem = [...chainData.chain]
+              .sort((a, b) => a.timestamp - b.timestamp)
+              .find(
+                (item) =>
+                  item.type === 'input' &&
+                  ((item.input?.prompt && item.input.prompt.trim().length > 0) ||
+                    (item.input?.task && item.input.task.trim().length > 0))
+              )
+            const promptText = promptItem?.input?.prompt?.trim() || promptItem?.input?.task?.trim()
+            if (promptText) foundPrompt = extractUserTaskFromPrompt(promptText)
+          }
+          const outputCandidate = extractLatestLlmOutputFromChain(chainData)
+          if (outputCandidate && (!latestOutput || outputCandidate.timestamp > latestOutput.timestamp)) {
+            latestOutput = outputCandidate
+          }
         }
-        if (!foundOutput) {
-          const outputText = extractLlmOutputFromChain(chainData)
-          if (outputText) foundOutput = outputText
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          console.error('Failed to fetch task prompts from chain:', error)
         }
-        if (foundPrompt && foundOutput) break
       }
-      if (!canceled) setSelectedTaskUserPrompt(foundPrompt)
-      if (!canceled) setSelectedTaskLlmOutput(foundOutput)
-      if (!canceled) setTaskPromptLoading(false)
+      if (!controller.signal.aborted) setSelectedTaskUserPrompt(foundPrompt)
+      if (!controller.signal.aborted) setSelectedTaskLlmOutput(latestOutput?.text ?? null)
+      if (!controller.signal.aborted) {
+        setSelectedTaskToolCalls(allToolCalls.sort((a, b) => a.timestamp - b.timestamp))
+      }
+      if (!controller.signal.aborted) setTaskPromptLoading(false)
     })()
 
     return () => {
-      canceled = true
+      controller.abort()
     }
   }, [selectedTask])
 
@@ -1688,22 +1787,26 @@ export default function App() {
   }, [taskMenuData])
 
   useEffect(() => {
-    let canceled = false
+    const controller = new AbortController()
     if (!selectedRun?.runId) {
       setSelectedRunChainToolCalls(null)
       return
     }
     setSelectedRunChainToolCalls(null)
-    fetchChain(selectedRun.runId)
+    fetchChain(selectedRun.runId, { signal: controller.signal, timeoutMs: 12000 })
       .then((chainData) => {
-        if (canceled || !chainData) return
+        if (controller.signal.aborted || !chainData) return
         setSelectedRunChainToolCalls(mapToolCallsFromChain(chainData))
       })
-      .catch(() => {
-        if (!canceled) setSelectedRunChainToolCalls(null)
+      .catch((error) => {
+        if (controller.signal.aborted) return
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          console.error('Failed to fetch selected run chain:', error)
+        }
+        setSelectedRunChainToolCalls(null)
       })
     return () => {
-      canceled = true
+      controller.abort()
     }
   }, [selectedRun?.runId])
 
@@ -2145,6 +2248,7 @@ export default function App() {
                     key={run.runId}
                     node={run}
                     selectedId={viewMode === 'run' ? selectedRun?.runId ?? '' : ''}
+                    pricingLoaded={pricingLoaded}
                     onSelect={(node) => {
                       logRunListDebug('select-run-from-list', {
                         runId: node.runId,
@@ -2311,7 +2415,7 @@ export default function App() {
                     )}
                   </div>
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-3">LLM 输出（Output）</h3>
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">最终文字回复（Final Output）</h3>
                     {taskPromptLoading ? (
                       <p className="text-xs text-slate-500">加载中...</p>
                     ) : selectedTaskLlmOutput ? (
@@ -2322,6 +2426,69 @@ export default function App() {
                       </div>
                     ) : (
                       <p className="text-xs text-slate-500">未获取到 LLM 输出内容</p>
+                    )}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">工具调用明细（参数与输出）</h3>
+                    {taskPromptLoading ? (
+                      <p className="text-xs text-slate-500">加载中...</p>
+                    ) : selectedTaskToolCalls && selectedTaskToolCalls.length > 0 ? (
+                      <div className="space-y-3">
+                        {selectedTaskToolCalls.map((tool, index) => (
+                          <div
+                            key={`${tool.toolCallId ?? `${tool.runId}-${tool.timestamp}`}-${index}`}
+                            className="bg-slate-50 rounded-xl border border-slate-200 p-4"
+                          >
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="mono text-sm font-bold text-slate-800 truncate">
+                                  {tool.toolName}
+                                </span>
+                                <span className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded px-2 py-0.5">
+                                  {tool.runId.substring(0, 12)}...
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px] text-slate-500 shrink-0">
+                                <span>{formatTime(tool.timestamp)}</span>
+                                {tool.durationMs != null && <span>{tool.durationMs}ms</span>}
+                                <span
+                                  className={cn(
+                                    'px-2 py-0.5 rounded-full border font-semibold',
+                                    tool.error
+                                      ? 'bg-rose-100 text-rose-700 border-rose-200'
+                                      : 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                                  )}
+                                >
+                                  {tool.error ? '失败' : '成功'}
+                                </span>
+                              </div>
+                            </div>
+                            {tool.params && Object.keys(tool.params).length > 0 && (
+                              <div className="mt-3">
+                                <p className="text-[11px] font-semibold text-slate-500 mb-1">Params</p>
+                                <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded-lg p-3 whitespace-pre-wrap break-words overflow-x-auto">
+                                  {JSON.stringify(tool.params, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                            {tool.result && (
+                              <div className="mt-3">
+                                <p className="text-[11px] font-semibold text-slate-500 mb-1">Output</p>
+                                <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded-lg p-3 whitespace-pre-wrap break-words overflow-x-auto">
+                                  {tool.result}
+                                </pre>
+                              </div>
+                            )}
+                            {tool.error && (
+                              <p className="mt-3 text-xs text-rose-600 whitespace-pre-wrap break-words">
+                                {tool.error}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">当前任务未采集到工具调用明细</p>
                     )}
                   </div>
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
