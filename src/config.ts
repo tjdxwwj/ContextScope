@@ -96,13 +96,13 @@ export const configSchema = {
         },
         anonymizeContent: {
           type: 'boolean',
-          default: false
+          default: true
         },
         maxPromptLength: {
           type: 'number',
-          minimum: 0,
-          maximum: 5000000,
-          default: 0
+          minimum: 100,
+          maximum: 100000,
+          default: 4000
         }
       }
     },

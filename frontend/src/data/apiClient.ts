@@ -351,10 +351,6 @@ export async function fetchRequests(
       lastUpdated: Date.now(),
     }
     
-    console.log('[API] Fetched:', requests.length, 'requests,', subagentLinks.length, 'links,', toolCalls.length, 'toolCalls')
-    if (requests.length > 0) {
-      console.log('[API] Sample request:', JSON.stringify(requests[0], null, 2))
-    }
     return result
   } catch (error) {
     if (!isAbortError(error)) {

@@ -12,13 +12,13 @@ import {
   Search,
   Zap,
   LayoutDashboard,
-  GitBranch,
   Maximize2,
   Minimize2,
   MousePointer2,
   Calendar,
   Trash2,
   DollarSign,
+  RefreshCw,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import { message, Modal } from 'antd'
@@ -414,9 +414,7 @@ const formatTime = (ts: number) =>
   new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
 const formatFullTime = (ts: number) =>
   new Date(ts).toLocaleString('zh-CN', { hour12: false })
-const logRunListDebug = (event: string, payload: Record<string, unknown> = {}) => {
-  console.log(`[RunListDebug] ${event}`, payload)
-}
+const logRunListDebug = (_event: string, _payload: Record<string, unknown> = {}) => {}
 const asParamsRecord = (value: unknown): Record<string, unknown> | undefined => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
@@ -1780,7 +1778,7 @@ const GlobalOverview = ({
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
             <div className="p-2 bg-purple-50 rounded-lg text-purple-500">
-              <GitBranch className="w-5 h-5" />
+              <Layers className="w-5 h-5" />
             </div>
             <h4 className="text-sm font-bold text-slate-800">分支深度</h4>
           </div>
@@ -1816,9 +1814,36 @@ export default function App() {
   const [selectedTaskResolvedRunIds, setSelectedTaskResolvedRunIds] = useState<string[]>([])
   const [selectedTaskRunsLoading, setSelectedTaskRunsLoading] = useState(false)
   
+  // 价格加载状态
+  const [pricingLoading, setPricingLoading] = useState(true)
+  const [pricingError, setPricingError] = useState<string | null>(null)
+  
   useEffect(() => {
-    ensurePricingLoaded()
+    const loadPricing = async () => {
+      try {
+        setPricingLoading(true)
+        setPricingError(null)
+        await ensurePricingLoaded()
+        setPricingLoading(false)
+      } catch (error) {
+        setPricingError('价格加载失败')
+        setPricingLoading(false)
+      }
+    }
+    loadPricing()
   }, [])
+  
+  const handleRetryPricing = async () => {
+    try {
+      setPricingLoading(true)
+      setPricingError(null)
+      await ensurePricingLoaded()
+      setPricingLoading(false)
+    } catch (error) {
+      setPricingError('价格加载失败')
+      setPricingLoading(false)
+    }
+  }
 
   const handleLocate = useCallback((runId: string) => {
     logRunListDebug('locate-run-requested', {
@@ -1972,43 +1997,6 @@ export default function App() {
       totalTokens: displayTotal,
     }
   }, [selectedTaskStats, selectedTaskAllRunNodes, selectedTaskFallbackToolCalls])
-  const selectedTaskWorkflowRun = useMemo(() => {
-    if (!selectedTask) return null
-    const workflowRoots = selectedTaskWorkflowRoots
-    if (workflowRoots.length === 0) return null
-    if (workflowRoots.length === 1) return workflowRoots[0]
-
-    const usage = workflowRoots.reduce(
-      (acc, runNode) => ({
-        input: acc.input + runNode.usage.input,
-        output: acc.output + runNode.usage.output,
-        total: acc.total + runNode.usage.total,
-      }),
-      { input: 0, output: 0, total: 0 }
-    )
-    const hasError = workflowRoots.some((runNode) => runNode.status === 'error')
-    const hasRunning = workflowRoots.some((runNode) => runNode.status === 'running')
-    const isAllSuccess = workflowRoots.every((runNode) => runNode.status === 'success')
-    const status: RunTreeNode['status'] = hasError
-      ? 'error'
-      : hasRunning
-        ? 'running'
-        : isAllSuccess
-          ? 'success'
-          : 'unknown'
-    return {
-      runId: selectedTask.taskId,
-      sessionId: selectedTask.sessionId,
-      sessionKey: selectedTask.sessionKey,
-      startTime: Math.min(...workflowRoots.map((runNode) => runNode.startTime)),
-      endTime: Math.max(...workflowRoots.map((runNode) => runNode.endTime)),
-      usage,
-      requestCount: workflowRoots.reduce((sum, runNode) => sum + runNode.requestCount, 0),
-      status,
-      children: workflowRoots,
-      toolCalls: [],
-    }
-  }, [selectedTask, selectedTaskWorkflowRoots])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -2179,7 +2167,6 @@ export default function App() {
         try {
           const realTimeData = await loadRealTimeData()
           if (realTimeData && realTimeData.requests.length > 0) {
-            console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
             const tree = buildRunTree(realTimeData)
             const nextSignature = buildRunTreeSignature(tree)
             if (nextSignature === rootsSignatureRef.current) return
@@ -2706,7 +2693,7 @@ export default function App() {
                     </span>
                   </div>
                   {(() => {
-                    const model = selectedTaskWorkflowRun?.model || ''
+                    const model = selectedTaskWorkflowRoots[0]?.model || ''
                     const inputResult = calculateCost(model, selectedTaskDisplayStats.totalInput, 0)
                     const outputResult = calculateCost(model, 0, selectedTaskDisplayStats.totalOutput)
                     const totalResult = calculateCost(model, selectedTaskDisplayStats.totalInput, selectedTaskDisplayStats.totalOutput)
@@ -2717,30 +2704,41 @@ export default function App() {
                           { 
                             label: 'Input Tokens', 
                             value: selectedTaskDisplayStats.totalInput.toLocaleString(),
-                            subValue: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
+                            cost: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
                             matched: inputResult.matched,
-                            isCost: false 
                           },
                           { 
                             label: 'Output Tokens', 
                             value: selectedTaskDisplayStats.totalOutput.toLocaleString(),
-                            subValue: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
+                            cost: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
                             matched: outputResult.matched,
-                            isCost: false 
                           },
                           { 
                             label: 'Total Tokens', 
                             value: selectedTaskDisplayStats.totalTokens.toLocaleString(),
-                            subValue: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
+                            cost: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
                             matched: totalResult.matched,
-                            isCost: false 
                           },
-                          { label: 'LLM Calls', value: selectedTaskDisplayStats.llmCalls.toLocaleString(), isCost: false },
+                          { label: 'LLM Calls', value: selectedTaskDisplayStats.llmCalls.toLocaleString() },
                           { 
                             label: 'Total Cost', 
-                            value: totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配', 
-                            matched: totalResult.matched,
-                            isCost: true
+                            value: pricingLoading ? (
+                              <span className="flex items-center gap-2 text-lg">
+                                <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />
+                                <span className="text-slate-400">加载中...</span>
+                              </span>
+                            ) : pricingError ? (
+                              <button
+                                onClick={handleRetryPricing}
+                                className="text-lg text-rose-600 hover:text-rose-700 flex items-center gap-2 transition-colors"
+                                title="点击重试"
+                              >
+                                <RefreshCw className="w-4 h-4" />
+                                <span>加载失败，点击重试</span>
+                              </button>
+                            ) : (
+                              totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配'
+                            ),
                           },
                         ].map((stat) => (
                           <div
@@ -2750,23 +2748,38 @@ export default function App() {
                             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
                               {stat.label}
                             </p>
-                            {stat.subValue ? (
+                            {'cost' in stat && typeof stat.cost === 'string' ? (
                               <>
                                 <p className="text-lg font-bold text-slate-900 mono">
                                   {stat.value}
                                 </p>
                                 <p className={cn(
                                   "text-[11px] font-bold mono mt-0.5",
+                                  pricingLoading ? "text-slate-400" :
+                                  pricingError ? "text-rose-600" :
                                   stat.matched ? "text-emerald-600" : "text-slate-400 italic"
                                 )}>
-                                  {stat.subValue}
+                                  {pricingLoading ? (
+                                    <span className="flex items-center gap-1">
+                                      <RefreshCw className="w-3 h-3 animate-spin" />
+                                      加载中...
+                                    </span>
+                                  ) : pricingError ? (
+                                    <button
+                                      onClick={handleRetryPricing}
+                                      className="hover:underline flex items-center gap-1"
+                                      title="点击重试"
+                                    >
+                                      <RefreshCw className="w-3 h-3" />
+                                      加载失败，点击重试
+                                    </button>
+                                  ) : (
+                                    stat.cost
+                                  )}
                                 </p>
                               </>
                             ) : (
-                              <p className={cn(
-                                "text-2xl font-bold mono",
-                                stat.isCost ? "text-emerald-600" : "text-slate-900"
-                              )}>
+                              <p className="text-2xl font-bold mono text-slate-900">
                                 {stat.value}
                               </p>
                             )}

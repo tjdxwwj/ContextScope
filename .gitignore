@@ -4,3 +4,8 @@ dist/
 *.log
 .DS_Store
 openclaw.local-test.json
+.openclaw-state/
+docs/requests.json
+frontend/public/data/requests.json
+*.pem
+*.key

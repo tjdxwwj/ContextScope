@@ -162,7 +162,7 @@ export class RequestAnalyzerService {
   async captureRequest(data: any): Promise<void> {
     try {
       // Apply content filtering if needed
-      if (this.config.capture?.anonymizeContent) {
+      if (this.config.capture?.anonymizeContent !== false) {
         data = this.anonymizeContent(data);
       }
 
@@ -181,7 +181,7 @@ export class RequestAnalyzerService {
 
   async captureResponse(data: any): Promise<void> {
     try {
-      if (this.config.capture?.anonymizeContent) {
+      if (this.config.capture?.anonymizeContent !== false) {
         data = this.anonymizeContent(data);
       }
 
@@ -252,7 +252,7 @@ export class RequestAnalyzerService {
 
   async captureToolCall(data: ToolCallData): Promise<void> {
     try {
-      if (this.config.capture?.anonymizeContent) {
+      if (this.config.capture?.anonymizeContent !== false) {
         data = this.anonymizeAny(data) as ToolCallData;
       }
       await this.storage.captureToolCall(data);

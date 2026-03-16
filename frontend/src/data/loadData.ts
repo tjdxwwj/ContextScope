@@ -8,11 +8,8 @@ import { fetchRequests, type DateFilter } from './apiClient'
 export async function loadLocalStore(filter?: DateFilter): Promise<RawStore | null> {
   const apiData = await fetchRequests(filter, { includeAux: true })
   if (apiData) {
-    console.log('[Data] Loaded from real API:', apiData.requests.length, 'requests')
     return apiData
   }
-
-  console.log('[Data] No data (API unavailable)')
   return null
 }
 

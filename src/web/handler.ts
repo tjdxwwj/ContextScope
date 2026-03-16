@@ -728,11 +728,32 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
 
   function convertToCSV(requests: any[]): string {
     const headers = ['ID', 'Type', 'Run ID', 'Session ID', 'Provider', 'Model', 'Timestamp', 'Input Tokens', 'Output Tokens', 'Total Tokens'];
+    const escapeCell = (value: unknown): string => {
+      let cell = value == null ? '' : String(value);
+      if (/^[=\-+@]/.test(cell)) {
+        cell = `'${cell}`;
+      }
+      if (cell.includes('"')) {
+        cell = cell.replace(/"/g, '""');
+      }
+      if (/[",\r\n]/.test(cell)) {
+        cell = `"${cell}"`;
+      }
+      return cell;
+    };
     const rows = requests.map(req => [
-      req.id || '', req.type || '', req.runId || '', req.sessionId || '', req.provider || '', req.model || '',
-      new Date(req.timestamp).toISOString(), req.usage?.input || '', req.usage?.output || '', req.usage?.total || ''
+      req.id ?? '',
+      req.type ?? '',
+      req.runId ?? '',
+      req.sessionId ?? '',
+      req.provider ?? '',
+      req.model ?? '',
+      new Date(req.timestamp).toISOString(),
+      req.usage?.input ?? '',
+      req.usage?.output ?? '',
+      req.usage?.total ?? ''
     ]);
-    return [headers, ...rows].map(row => row.join(',')).join('\n');
+    return [headers, ...rows].map(row => row.map(escapeCell).join(',')).join('\n');
   }
 
   function parseTimeFilters(searchParams: URLSearchParams): { startTime?: number; endTime?: number } {

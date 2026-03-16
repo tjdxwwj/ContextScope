@@ -1,0 +1,7 @@
+.openclaw-state/
+frontend/public/data/requests.json
+docs/requests.json
+openclaw.local-test.json
+openclaw.local-test.json.bak
+*.log
+*.db

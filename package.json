@@ -11,6 +11,13 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "frontend/dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
   "openclaw": {
     "extensions": [
       "./dist/index.js"
@@ -31,6 +38,9 @@
     "openclaw": "^2026.3.13",
     "tiktoken": "^1.0.22"
   },
+  "overrides": {
+    "@hono/node-server": "^1.19.10"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "concurrently": "^9.0.0",
@@ -45,10 +55,6 @@
     "request-analysis",
     "llm-analytics"
   ],
-  "author": "Your Name",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/yourname/contextscope"
-  }
+  "author": "ContextScope Contributors",
+  "license": "MIT"
 }
