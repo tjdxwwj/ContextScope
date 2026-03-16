@@ -4,7 +4,13 @@
  * Core service that handles request analysis, statistics, and alerts
  */
 
-import type { RequestAnalyzerStorage, SubagentLinkData, ToolCallData } from './storage.js';
+import type {
+  RequestAnalyzerStorage,
+  RequestListItem,
+  RequestQueryFilters,
+  SubagentLinkData,
+  ToolCallData,
+} from './storage.js';
 import type { PluginConfig } from './config.js';
 import { ContextAnalyzer, type AnalysisResult, type AnalysisInsight } from './analyzer.js';
 import { TokenEstimationService } from './token-estimator.js';
@@ -330,8 +336,12 @@ export class RequestAnalyzerService {
     return stats;
   }
 
-  async getRequests(filters: any = {}): Promise<any[]> {
+  async getRequests(filters: RequestQueryFilters = {}): Promise<any[]> {
     return await this.storage.getRequests(filters);
+  }
+
+  async getRequestSummaries(filters: RequestQueryFilters = {}): Promise<RequestListItem[]> {
+    return await this.storage.getRequestSummaries(filters);
   }
 
   async getSubagentLinks(filters: {
@@ -864,10 +874,15 @@ export class RequestAnalyzerService {
         stats: {
           totalMessages: historyMessages.length + 1, // +1 for current prompt
           totalTokens: tokenDistribution.total,
-          systemPromptPercentage: tokenDistribution.percentages.systemPrompt,
-          historyPercentage: tokenDistribution.percentages.history,
-          userPromptPercentage: tokenDistribution.percentages.userPrompt,
-          toolResponsesPercentage: tokenDistribution.percentages.toolResponses
+          systemPromptPercentage: tokenDistribution.percentages.systemPrompt || 0,
+          historyPercentage:
+            (tokenDistribution.percentages.historyUser || 0) +
+            (tokenDistribution.percentages.historyAssistant || 0) +
+            (tokenDistribution.percentages.historyTool || 0) +
+            (tokenDistribution.percentages.historySystem || 0) +
+            (tokenDistribution.percentages.historyOther || 0),
+          userPromptPercentage: tokenDistribution.percentages.currentUserPrompt || 0,
+          toolResponsesPercentage: tokenDistribution.percentages.historyTool || 0
         }
       };
     } catch (error) {
@@ -884,37 +899,74 @@ export class RequestAnalyzerService {
     userPrompt: string,
     historyMessages: any[]
   ): Promise<TokenDistribution> {
-    const systemTokens = this.tokenEstimator.countTokens(systemPrompt);
-    const userPromptTokens = this.tokenEstimator.countTokens(userPrompt);
-    const historyTokens = this.tokenEstimator.countMessagesTokens(historyMessages);
-    
-    // 计算工具响应的 tokens
-    let toolResponseTokens = 0;
-    historyMessages.forEach(msg => {
-      if (msg.role === 'tool' || msg.role === 'toolResult') {
-        if (typeof msg.content === 'string') {
-          toolResponseTokens += this.tokenEstimator.countTokens(msg.content);
-        }
-      }
-    });
+    const baseBreakdown: Record<string, number> = {
+      systemPrompt: this.tokenEstimator.countTokens(systemPrompt),
+      currentUserPrompt: this.tokenEstimator.countTokens(userPrompt),
+      historyUser: 0,
+      historyAssistant: 0,
+      historyTool: 0,
+      historySystem: 0,
+      historyOther: 0,
+    };
 
-    const total = systemTokens + userPromptTokens + historyTokens;
+    for (const message of Array.isArray(historyMessages) ? historyMessages : []) {
+      const role = typeof message?.role === 'string' ? message.role : 'other';
+      const contentTokens = this.estimateMessageTokens(message);
+      if (role === 'user') baseBreakdown.historyUser += contentTokens;
+      else if (role === 'assistant') baseBreakdown.historyAssistant += contentTokens;
+      else if (role === 'tool' || role === 'toolResult') baseBreakdown.historyTool += contentTokens;
+      else if (role === 'system') baseBreakdown.historySystem += contentTokens;
+      else baseBreakdown.historyOther += contentTokens;
+    }
+
+    const total = Object.values(baseBreakdown).reduce((sum, value) => sum + value, 0);
+    const percentages = Object.entries(baseBreakdown).reduce<Record<string, number>>((acc, [key, value]) => {
+      acc[key] = total > 0 ? Math.round((value / total) * 100) : 0;
+      return acc;
+    }, {});
 
     return {
       total,
-      breakdown: {
-        systemPrompt: systemTokens,
-        userPrompt: userPromptTokens,
-        history: historyTokens,
-        toolResponses: toolResponseTokens
-      },
-      percentages: {
-        systemPrompt: total > 0 ? Math.round((systemTokens / total) * 100) : 0,
-        userPrompt: total > 0 ? Math.round((userPromptTokens / total) * 100) : 0,
-        history: total > 0 ? Math.round((historyTokens / total) * 100) : 0,
-        toolResponses: total > 0 ? Math.round((toolResponseTokens / total) * 100) : 0
-      }
+      breakdown: baseBreakdown,
+      percentages
     };
+  }
+
+  private estimateMessageTokens(message: any): number {
+    if (!message || typeof message !== 'object') return 0;
+    let total = 0;
+    const content = (message as any).content;
+    if (typeof content === 'string') {
+      total += this.tokenEstimator.countTokens(content);
+    } else if (Array.isArray(content)) {
+      for (const item of content) {
+        if (item?.type === 'text' && typeof item.text === 'string') {
+          total += this.tokenEstimator.countTokens(item.text);
+        } else if (item != null) {
+          total += this.tokenEstimator.countTokens(JSON.stringify(item));
+        }
+      }
+    } else if (content != null) {
+      total += this.tokenEstimator.countTokens(JSON.stringify(content));
+    }
+
+    const ancillaryFields = [
+      'name',
+      'tool_call_id',
+      'tool_calls',
+      'function_call',
+      'arguments',
+      'input',
+      'output',
+      'result',
+    ];
+    for (const field of ancillaryFields) {
+      const value = (message as any)[field];
+      if (value == null) continue;
+      if (typeof value === 'string') total += this.tokenEstimator.countTokens(value);
+      else total += this.tokenEstimator.countTokens(JSON.stringify(value));
+    }
+    return total;
   }
 
   // ==================== OpenRouter Pricing Methods ====================
@@ -1092,18 +1144,8 @@ export interface ContextDistributionResponse {
 
 export interface TokenDistribution {
   total: number;
-  breakdown: {
-    systemPrompt: number;
-    userPrompt: number;
-    history: number;
-    toolResponses: number;
-  };
-  percentages: {
-    systemPrompt: number;
-    userPrompt: number;
-    history: number;
-    toolResponses: number;
-  };
+  breakdown: Record<string, number>;
+  percentages: Record<string, number>;
 }
 
 // ==================== OpenRouter Pricing Types ====================

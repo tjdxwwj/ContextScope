@@ -1,4 +1,4 @@
-﻿/**
+/**
  * HTTP Handler for ContextScope Dashboard
  * 
  * Serves the web interface and API endpoints with advanced visualizations
@@ -65,6 +65,10 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       
       if (path === '/plugins/contextscope/api/requests') {
         return await handleRequests(req, res, url);
+      }
+
+      if (path === '/plugins/contextscope/api/requests/detail') {
+        return await handleRequestDetails(req, res, url);
       }
 
       if (path === '/plugins/contextscope/api/analysis') {
@@ -236,24 +240,61 @@ export function createAnalyzerHttpHandler(params: HandlerParams) {
       const filters = {
         sessionId: searchParams.get('sessionId') || undefined,
         runId: searchParams.get('runId') || undefined,
+        taskId: searchParams.get('taskId') || undefined,
         provider: searchParams.get('provider') || undefined,
         model: searchParams.get('model') || undefined,
         ...timeFilters,
         limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
         offset: searchParams.get('offset') ? parseInt(searchParams.get('offset')!) : 0
       };
+      const full = searchParams.get('full') === 'true';
 
-      const requests = await service.getRequests(filters);
+      const requests = full
+        ? await service.getRequests(filters)
+        : await service.getRequestSummaries(filters);
 
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ requests, total: requests.length, filters }));
+      res.end(JSON.stringify({ requests, total: requests.length, filters, full }));
       return true;
     } catch (error) {
       logger.error(`Failed to get requests: ${error}`);
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Failed to get requests' }));
+      return true;
+    }
+  }
+
+  async function handleRequestDetails(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method !== 'GET') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return true;
+    }
+
+    try {
+      const runId = url.searchParams.get('runId');
+      if (!runId) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'runId parameter is required' }));
+        return true;
+      }
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam ? parseInt(limitParam) : 200;
+      const requests = await service.getRequests({ runId, limit: Number.isFinite(limit) ? limit : 200 });
+      const toolCalls = await service.getToolCalls({ runId, limit: 200 });
+      const subagentLinks = await service.getSubagentLinks({ parentRunId: runId, limit: 200 });
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ runId, requests, toolCalls, subagentLinks }));
+      return true;
+    } catch (error) {
+      logger.error(`Failed to get request details: ${error}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to get request details' }));
       return true;
     }
   }

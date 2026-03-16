@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import type { PluginLogger, TaskMeta, TaskTokenStats, TaskTreeNode } from './types.js';
+import type { PluginLogger, TaskData, TaskMeta, TaskTokenStats, TaskTreeNode } from './types.js';
 
 export interface RequestData {
   id?: number;
@@ -31,6 +31,38 @@ export interface RequestData {
   };
   imagesCount?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface RequestListItem {
+  id?: number;
+  type: 'input' | 'output';
+  runId: string;
+  taskId?: string;
+  sessionId: string;
+  sessionKey?: string;
+  provider: string;
+  model: string;
+  timestamp: number;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total?: number;
+  };
+  imagesCount?: number;
+}
+
+export interface RequestQueryFilters {
+  sessionId?: string;
+  runId?: string;
+  taskId?: string;
+  provider?: string;
+  model?: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface SubagentLinkData {
@@ -587,6 +619,22 @@ export class RequestAnalyzerStorage {
     };
   }
 
+  private fromSqliteRequestSummaryRow(row: any): RequestListItem {
+    return {
+      id: row.id,
+      type: row.type,
+      runId: row.run_id,
+      taskId: row.task_id ?? undefined,
+      sessionId: row.session_id,
+      sessionKey: row.session_key ?? undefined,
+      provider: row.provider,
+      model: row.model,
+      timestamp: row.timestamp,
+      usage: this.parseJson<RequestData['usage']>(row.usage_json),
+      imagesCount: row.images_count ?? undefined,
+    };
+  }
+
   private fromSqliteToolCallRow(row: any): ToolCallData {
     return {
       id: row.id,
@@ -703,12 +751,21 @@ export class RequestAnalyzerStorage {
   /**
    * Update task stats
    */
-  async updateTaskStats(taskId: string, stats: Partial<TaskStats>): Promise<void> {
+  async updateTaskStats(taskId: string, stats: Partial<TaskTokenStats>): Promise<void> {
     if (!this.initialized) await this.initialize();
 
     const task = this.tasks.find(t => t.taskId === taskId);
     if (task) {
-      task.stats = { ...task.stats, ...stats };
+      task.tokenStats = { ...(task.tokenStats ?? { totalInput: 0, totalOutput: 0, totalTokens: 0, estimatedCost: 0 }), ...stats };
+      task.stats = {
+        llmCalls: task.llmCalls,
+        toolCalls: task.toolCalls,
+        subagentSpawns: task.subagentSpawns,
+        totalInput: task.tokenStats.totalInput,
+        totalOutput: task.tokenStats.totalOutput,
+        totalTokens: task.tokenStats.totalTokens,
+        estimatedCost: task.tokenStats.estimatedCost,
+      };
       this.schedulePersist();
       this.options.logger.debug?.(`Updated stats for task ${taskId}`);
     }
@@ -801,6 +858,12 @@ export class RequestAnalyzerStorage {
    * Aggregate stats (recursive)
    */
   private aggregateStats(task: TaskData, children: TaskTreeNode[]): TaskTreeNode['aggregatedStats'] {
+    const selfTokenStats = task.tokenStats ?? task.stats ?? {
+      totalInput: 0,
+      totalOutput: 0,
+      totalTokens: 0,
+      estimatedCost: 0,
+    };
     const childStats = children.reduce((acc, child) => ({
       llmCalls: acc.llmCalls + child.aggregatedStats.llmCalls,
       toolCalls: acc.toolCalls + child.aggregatedStats.toolCalls,
@@ -824,13 +887,13 @@ export class RequestAnalyzerStorage {
     });
 
     return {
-      llmCalls: task.stats.llmCalls + childStats.llmCalls,
-      toolCalls: task.stats.toolCalls + childStats.toolCalls,
-      subagentSpawns: task.stats.subagentSpawns + childStats.subagentSpawns,
-      totalInput: task.stats.totalInput + childStats.totalInput,
-      totalOutput: task.stats.totalOutput + childStats.totalOutput,
-      totalTokens: task.stats.totalTokens + childStats.totalTokens,
-      estimatedCost: task.stats.estimatedCost + childStats.estimatedCost,
+      llmCalls: task.llmCalls + childStats.llmCalls,
+      toolCalls: task.toolCalls + childStats.toolCalls,
+      subagentSpawns: task.subagentSpawns + childStats.subagentSpawns,
+      totalInput: selfTokenStats.totalInput + childStats.totalInput,
+      totalOutput: selfTokenStats.totalOutput + childStats.totalOutput,
+      totalTokens: selfTokenStats.totalTokens + childStats.totalTokens,
+      estimatedCost: selfTokenStats.estimatedCost + childStats.estimatedCost,
       depth: 1 + childStats.depth,
       descendantCount: childStats.descendantCount
     };
@@ -927,16 +990,7 @@ export class RequestAnalyzerStorage {
     }
   }
 
-  async getRequests(filters: {
-    sessionId?: string;
-    runId?: string;
-    provider?: string;
-    model?: string;
-    startTime?: number;
-    endTime?: number;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<RequestData[]> {
+  async getRequests(filters: RequestQueryFilters = {}): Promise<RequestData[]> {
     if (!this.initialized) await this.initialize();
     if (this.sqliteEnabled && this.sqliteDb) {
       const clauses: string[] = [];
@@ -948,6 +1002,10 @@ export class RequestAnalyzerStorage {
       if (filters.runId) {
         clauses.push('run_id = ?');
         params.push(filters.runId);
+      }
+      if (filters.taskId) {
+        clauses.push('task_id = ?');
+        params.push(filters.taskId);
       }
       if (filters.provider) {
         clauses.push('provider = ?');
@@ -985,6 +1043,80 @@ export class RequestAnalyzerStorage {
       if (filters.endTime && request.timestamp > filters.endTime) continue;
       if (matched >= offset && result.length < limit) {
         result.push(request);
+      }
+      matched++;
+      if (result.length >= limit) break;
+    }
+    return result;
+  }
+
+  async getRequestSummaries(filters: RequestQueryFilters = {}): Promise<RequestListItem[]> {
+    if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.sqliteDb) {
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      if (filters.sessionId) {
+        clauses.push('session_id = ?');
+        params.push(filters.sessionId);
+      }
+      if (filters.runId) {
+        clauses.push('run_id = ?');
+        params.push(filters.runId);
+      }
+      if (filters.taskId) {
+        clauses.push('task_id = ?');
+        params.push(filters.taskId);
+      }
+      if (filters.provider) {
+        clauses.push('provider = ?');
+        params.push(filters.provider);
+      }
+      if (filters.model) {
+        clauses.push('model = ?');
+        params.push(filters.model);
+      }
+      if (filters.startTime) {
+        clauses.push('timestamp >= ?');
+        params.push(filters.startTime);
+      }
+      if (filters.endTime) {
+        clauses.push('timestamp <= ?');
+        params.push(filters.endTime);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const offset = filters.offset || 0;
+      const limit = filters.limit || 100;
+      const sql = `SELECT id, type, run_id, task_id, session_id, session_key, provider, model, timestamp, usage_json, images_count FROM requests ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
+      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
+      return rows.map((row: any) => this.fromSqliteRequestSummaryRow(row));
+    }
+    const offset = filters.offset || 0;
+    const limit = filters.limit || 100;
+    const result: RequestListItem[] = [];
+    let matched = 0;
+    for (const request of this.requests) {
+      if (filters.sessionId && request.sessionId !== filters.sessionId) continue;
+      if (filters.runId && request.runId !== filters.runId) continue;
+      if (filters.taskId && request.taskId !== filters.taskId) continue;
+      if (filters.provider && request.provider !== filters.provider) continue;
+      if (filters.model && request.model !== filters.model) continue;
+      if (filters.startTime && request.timestamp < filters.startTime) continue;
+      if (filters.endTime && request.timestamp > filters.endTime) continue;
+      if (filters.endTime && request.timestamp > filters.endTime) continue;
+      if (matched >= offset && result.length < limit) {
+        result.push({
+          id: request.id,
+          type: request.type,
+          runId: request.runId,
+          taskId: request.taskId,
+          sessionId: request.sessionId,
+          sessionKey: request.sessionKey,
+          provider: request.provider,
+          model: request.model,
+          timestamp: request.timestamp,
+          usage: request.usage,
+          imagesCount: request.imagesCount,
+        });
       }
       matched++;
       if (result.length >= limit) break;

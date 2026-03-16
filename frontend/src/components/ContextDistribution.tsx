@@ -11,7 +11,7 @@ interface ContextTreemapProps {
 
 interface TreemapNode {
   name: string
-  key: keyof typeof COLORS // 'systemPrompt' | 'userPrompt' | 'history' | 'toolResponses'
+  key: string
   value: number
   color: string
   percentage: number
@@ -20,16 +20,35 @@ interface TreemapNode {
 
 const COLORS = {
   systemPrompt: '#8b5cf6', // Violet
-  userPrompt: '#f59e0b',   // Amber
-  history: '#3b82f6',      // Blue
-  toolResponses: '#10b981', // Emerald
+  currentUserPrompt: '#f59e0b', // Amber
+  historyUser: '#2563eb',
+  historyAssistant: '#3b82f6',
+  historyTool: '#10b981',
+  historySystem: '#7c3aed',
+  historyOther: '#64748b',
+  userPrompt: '#f59e0b',
+  history: '#3b82f6',
+  toolResponses: '#10b981',
 }
 
 const LABELS: Record<string, string> = {
   systemPrompt: 'System Prompt',
+  currentUserPrompt: 'Current User Prompt',
+  historyUser: 'History User Messages',
+  historyAssistant: 'History Assistant Messages',
+  historyTool: 'History Tool Messages',
+  historySystem: 'History System Messages',
+  historyOther: 'History Other Messages',
   userPrompt: 'User Prompt',
   history: 'History',
   toolResponses: 'Tool Responses',
+}
+
+function colorForKey(key: string, index: number): string {
+  const preset = (COLORS as Record<string, string>)[key]
+  if (preset) return preset
+  const fallback = ['#0ea5e9', '#14b8a6', '#f97316', '#22c55e', '#eab308', '#ec4899']
+  return fallback[index % fallback.length]
 }
 
 function CodeBlock({ content, label }: { content: string; label?: string }) {
@@ -141,6 +160,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedSection, setSelectedSection] = useState<string | null>(null)
+  const [retryVersion, setRetryVersion] = useState(0)
   const svgRef = useRef<SVGSVGElement>(null)
   const requestSeqRef = useRef(0)
 
@@ -172,7 +192,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
       setLoading(true)
       setLoadError(null)
       try {
-        const res = await fetchContext(runId, { signal: controller.signal, timeoutMs: 12000 })
+        const res = await fetchContext(runId, { signal: controller.signal, timeoutMs: 45000 })
         if (requestSeq !== requestSeqRef.current) {
           console.warn('[ContextDistribution]', 'ignore stale result by requestSeq mismatch', {
             runId,
@@ -247,50 +267,25 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
       })
       controller.abort()
     }
-  }, [runId])
+  }, [runId, retryVersion])
 
   const treemapData = useMemo((): TreemapNode | null => {
     if (!data?.tokenDistribution?.breakdown) return null
     
     const { breakdown, percentages } = data.tokenDistribution
     const children: TreemapNode[] = []
-
-    if (breakdown.systemPrompt > 0) {
-      children.push({
-        name: LABELS.systemPrompt,
-        key: 'systemPrompt',
-        value: breakdown.systemPrompt,
-        color: COLORS.systemPrompt,
-        percentage: percentages.systemPrompt
+    Object.entries(breakdown)
+      .filter(([, value]) => Number(value) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .forEach(([key, value], index) => {
+        children.push({
+          name: LABELS[key] || key,
+          key,
+          value: Number(value),
+          color: colorForKey(key, index),
+          percentage: Number(percentages[key] ?? 0),
+        })
       })
-    }
-    if (breakdown.history > 0) {
-      children.push({
-        name: LABELS.history,
-        key: 'history',
-        value: breakdown.history,
-        color: COLORS.history,
-        percentage: percentages.history
-      })
-    }
-    if (breakdown.userPrompt > 0) {
-      children.push({
-        name: LABELS.userPrompt,
-        key: 'userPrompt',
-        value: breakdown.userPrompt,
-        color: COLORS.userPrompt,
-        percentage: percentages.userPrompt
-      })
-    }
-    if (breakdown.toolResponses > 0) {
-      children.push({
-        name: LABELS.toolResponses,
-        key: 'toolResponses',
-        value: breakdown.toolResponses,
-        color: COLORS.toolResponses,
-        percentage: percentages.toolResponses
-      })
-    }
 
     if (children.length === 0) return null
 
@@ -413,8 +408,15 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
   if (!treemapData || !data) {
     if (!loadError) return null
     return (
-      <div className="h-40 flex items-center justify-center bg-slate-50 rounded-2xl border border-slate-100">
+      <div className="h-40 flex flex-col items-center justify-center gap-3 bg-slate-50 rounded-2xl border border-slate-100">
         <div className="text-xs text-slate-500">{loadError}</div>
+        <button
+          type="button"
+          onClick={() => setRetryVersion((prev) => prev + 1)}
+          className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
+        >
+          重新请求
+        </button>
       </div>
     )
   }
@@ -426,6 +428,9 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
           <Activity className="w-4 h-4 text-purple-500" />
           Context 分布 ({data.tokenDistribution.total} tokens)
         </h3>
+        <p className="text-[11px] text-slate-500 -mt-2 mb-3">
+          口径说明：Context 为整段提示词总量（system + 当前用户 + 历史对话 + 工具结果），不等于单次 Input Tokens
+        </p>
         <div className="w-full overflow-hidden rounded-xl bg-slate-50">
           <svg ref={svgRef} className="w-full h-40 block" />
         </div>
@@ -480,7 +485,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
                   </motion.div>
                 )}
                 
-                {selectedSection === 'userPrompt' && (
+                {(selectedSection === 'currentUserPrompt' || selectedSection === 'userPrompt') && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                     <CodeBlock content={data.context.userPrompt || '(Empty User Prompt)'} />
                   </motion.div>
@@ -492,12 +497,41 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
                   </motion.div>
                 )}
 
-                {selectedSection === 'toolResponses' && (
+                {(selectedSection === 'toolResponses' || selectedSection === 'historyTool') && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-4">
                     <p className="text-xs text-slate-500 px-2">
-                      Showing tool responses from history messages.
+                      Showing tool messages from history.
                     </p>
                     <HistoryList messages={(data.context.history || []).filter((m: any) => m.role === 'tool')} />
+                  </motion.div>
+                )}
+
+                {selectedSection === 'historyUser' && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    <HistoryList messages={(data.context.history || []).filter((m: any) => m.role === 'user')} />
+                  </motion.div>
+                )}
+
+                {selectedSection === 'historyAssistant' && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    <HistoryList messages={(data.context.history || []).filter((m: any) => m.role === 'assistant')} />
+                  </motion.div>
+                )}
+
+                {selectedSection === 'historySystem' && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    <HistoryList messages={(data.context.history || []).filter((m: any) => m.role === 'system')} />
+                  </motion.div>
+                )}
+
+                {selectedSection === 'historyOther' && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                    <HistoryList
+                      messages={(data.context.history || []).filter((m: any) => {
+                        const role = typeof m?.role === 'string' ? m.role : 'other'
+                        return !['user', 'assistant', 'system', 'tool', 'toolResult'].includes(role)
+                      })}
+                    />
                   </motion.div>
                 )}
               </div>

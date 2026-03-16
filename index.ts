@@ -392,11 +392,11 @@ const plugin = {
           
           api.logger.info(
             `✅ Task ${taskData.taskId}${childNote} completed: ` +
-            `${taskData.stats.llmCalls} LLM calls, ` +
-            `${taskData.stats.toolCalls} tools, ` +
-            `${taskData.stats.subagentSpawns} subagents, ` +
-            `${taskData.stats.totalTokens} tokens, ` +
-            `$${taskData.stats.estimatedCost.toFixed(4)}`
+            `${taskData.llmCalls} LLM calls, ` +
+            `${taskData.toolCalls} tools, ` +
+            `${taskData.subagentSpawns} subagents, ` +
+            `0 tokens, ` +
+            `$0.0000`
           );
         }
       } catch (error) {

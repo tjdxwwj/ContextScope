@@ -30,41 +30,33 @@ export function createTaskHttpHandler(params: { service: RequestAnalyzerService;
         const offset = parseInt(url.searchParams.get('offset') || '0');
 
         const tasks = await service.getRecentTasks(limit, sessionId, status);
-
-        // 为每个 task 计算真实的 token 统计（直接从数据库查询）
-        const tasksWithRealTokens = [];
-        for (const task of tasks) {
-          // 使用 service 的内部 storage 直接查询
-          const storage = (service as any).storage;
-          if (storage && storage.getRequests) {
-            const allRequests = await storage.getRequests({ limit: 100000 });
-            const taskRequests = allRequests.filter((r: any) => r.taskId === task.taskId);
-            const inputReqs = taskRequests.filter((r: any) => r.type === 'input');
-            const outputReqs = taskRequests.filter((r: any) => r.type === 'output');
-            
-            const realInput = inputReqs.reduce((sum: number, r: any) => sum + (r.usage?.input || 0), 0);
-            const realOutput = outputReqs.reduce((sum: number, r: any) => sum + (r.usage?.output || 0), 0);
-            
-            tasksWithRealTokens.push({
-              ...task,
-              stats: {
-                ...task.stats,
-                totalInput: realInput,
-                totalOutput: realOutput,
-                totalTokens: realInput + realOutput
-              }
-            });
-          } else {
-            tasksWithRealTokens.push(task);
-          }
-        }
+        const tasksWithStats = tasks.map((task) => {
+          const tokenStats = task.tokenStats ?? task.stats ?? {
+            totalInput: 0,
+            totalOutput: 0,
+            totalTokens: 0,
+            estimatedCost: 0,
+          };
+          return {
+            ...task,
+            stats: {
+              llmCalls: task.llmCalls,
+              toolCalls: task.toolCalls,
+              subagentSpawns: task.subagentSpawns,
+              totalInput: tokenStats.totalInput,
+              totalOutput: tokenStats.totalOutput,
+              totalTokens: tokenStats.totalTokens,
+              estimatedCost: tokenStats.estimatedCost,
+            },
+          };
+        });
 
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({
           success: true,
           data: {
-            tasks: tasksWithRealTokens,
+            tasks: tasksWithStats,
             pagination: {
               limit,
               offset,
@@ -272,8 +264,8 @@ export function createTaskHttpHandler(params: { service: RequestAnalyzerService;
         const sessionId = sessionStatsMatch[1];
         const tasks = await service.getRecentTasks(100, sessionId);
 
-        const totalTokens = tasks.reduce((sum, t) => sum + t.stats.totalTokens, 0);
-        const totalCost = tasks.reduce((sum, t) => sum + t.stats.estimatedCost, 0);
+        const totalTokens = tasks.reduce((sum, t) => sum + (t.tokenStats?.totalTokens ?? t.stats?.totalTokens ?? 0), 0);
+        const totalCost = tasks.reduce((sum, t) => sum + (t.tokenStats?.estimatedCost ?? t.stats?.estimatedCost ?? 0), 0);
 
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
@@ -288,8 +280,8 @@ export function createTaskHttpHandler(params: { service: RequestAnalyzerService;
             tasks: tasks.map(t => ({
               taskId: t.taskId,
               status: t.status,
-              tokens: t.stats.totalTokens,
-              llmCalls: t.stats.llmCalls
+              tokens: t.tokenStats?.totalTokens ?? t.stats?.totalTokens ?? 0,
+              llmCalls: t.llmCalls
             }))
           },
           timestamp: Date.now()

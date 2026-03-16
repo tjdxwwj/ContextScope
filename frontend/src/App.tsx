@@ -19,7 +19,6 @@ import {
   Calendar,
   Trash2,
   DollarSign,
-  RefreshCw,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import { message, Modal } from 'antd'
@@ -32,6 +31,7 @@ import { PricingInfo } from './components/PricingInfo'
 import { loadLocalStore, loadRealTimeData } from './data/loadData'
 import {
   fetchChain,
+  fetchTaskRunIds,
   fetchTasks,
   type ChainResponse,
   type TaskData,
@@ -43,6 +43,357 @@ import {
   type ToolCallSummary,
 } from './data/runTree'
 
+// ==================== Task Timeline 组件 ====================
+interface TaskTimelineEvent {
+  id: string
+  type: 'run' | 'tool' | 'input' | 'output'
+  startTime: number
+  endTime: number
+  label: string
+  data: RunTreeNode | ChainToolCallSummary | { inputTokens: number; outputTokens: number; model?: string }
+}
+
+interface TaskTimelineProps {
+  runs: RunTreeNode[]
+  toolCalls: ChainToolCallSummary[]
+  loading?: boolean
+}
+
+const TaskTimeline = ({ runs, toolCalls, loading = false }: TaskTimelineProps) => {
+  const [selectedEvent, setSelectedEvent] = useState<TaskTimelineEvent | null>(null)
+  
+  const allEvents = useMemo(() => {
+    const events: TaskTimelineEvent[] = []
+    
+    runs.forEach(run => {
+      events.push({
+        id: run.runId,
+        type: 'run',
+        startTime: run.startTime,
+        endTime: run.endTime,
+        label: `${run.runId.substring(0, 8)} (${run.model?.split('/').pop() ?? 'Unknown'})`,
+        data: run,
+      })
+      
+      if (run.usage.input > 0) {
+        events.push({
+          id: `${run.runId}-input`,
+          type: 'input',
+          startTime: run.startTime,
+          endTime: run.startTime + 1000,
+          label: `IN ${run.usage.input.toLocaleString()}`,
+          data: { inputTokens: run.usage.input, outputTokens: 0, model: run.model },
+        })
+      }
+      
+      if (run.usage.output > 0) {
+        events.push({
+          id: `${run.runId}-output`,
+          type: 'output',
+          startTime: run.endTime - 1000,
+          endTime: run.endTime,
+          label: `OUT ${run.usage.output.toLocaleString()}`,
+          data: { inputTokens: 0, outputTokens: run.usage.output, model: run.model },
+        })
+      }
+    })
+    
+    toolCalls.forEach(tool => {
+      events.push({
+        id: tool.toolCallId ?? `${tool.timestamp}`,
+        type: 'tool',
+        startTime: tool.timestamp,
+        endTime: tool.timestamp + (tool.durationMs ?? 0),
+        label: tool.toolName,
+        data: tool,
+      })
+    })
+    
+    return events.sort((a, b) => a.startTime - b.startTime)
+  }, [runs, toolCalls])
+  
+  const handleEventClick = (event: TaskTimelineEvent) => {
+    setSelectedEvent(event)
+  }
+  
+  return (
+    <>
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+        <h3 className="text-sm font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <Clock className="w-4 h-4 text-blue-500" />
+          任务执行时间线
+        </h3>
+        
+        <div className="space-y-2">
+          {allEvents.map(event => (
+            <TimelineEventRow
+              key={event.id}
+              event={event}
+              onClick={() => handleEventClick(event)}
+            />
+          ))}
+        </div>
+        
+        {!loading && allEvents.length === 0 && (
+          <p className="text-xs text-slate-500 text-center py-8">暂无执行记录</p>
+        )}
+        {loading && (
+          <p className="text-xs text-slate-500 text-center py-8">加载时间线中...</p>
+        )}
+      </div>
+      
+      {selectedEvent && (
+        <TimelineEventModal
+          event={selectedEvent}
+          onClose={() => setSelectedEvent(null)}
+        />
+      )}
+    </>
+  )
+}
+
+const TimelineEventRow = ({ event, onClick }: { event: TaskTimelineEvent; onClick: () => void }) => {
+  const config = {
+    run: { color: 'bg-blue-500', icon: Activity, label: 'LLM 调用' },
+    input: { color: 'bg-emerald-500', icon: Layers, label: 'Input' },
+    output: { color: 'bg-amber-500', icon: Zap, label: 'Output' },
+    tool: { color: 'bg-purple-500', icon: Terminal, label: '工具调用' },
+  }
+  const tokenUsageText =
+    event.type === 'run'
+      ? `Σ ${(event.data as RunTreeNode).usage.total.toLocaleString()} tokens`
+      : event.type === 'input'
+      ? `Σ ${((event.data as { inputTokens: number }).inputTokens || 0).toLocaleString()} tokens`
+      : event.type === 'output'
+      ? `Σ ${((event.data as { outputTokens: number }).outputTokens || 0).toLocaleString()} tokens`
+      : (() => {
+          const usage = (event.data as ChainToolCallSummary).tokenUsage
+          if (!usage) return 'Σ - tokens'
+          return `Σ ${usage.total.toLocaleString()} tokens${usage.estimated ? ' (估算)' : ''}`
+        })()
+  
+  const { color, icon: Icon, label } = config[event.type]
+  
+  return (
+    <div
+      onClick={onClick}
+      className="flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors border border-slate-100 group"
+    >
+      <div className={cn('w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0', color)}>
+        <Icon className="w-3 h-3" />
+      </div>
+      
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-sm font-bold text-slate-800 truncate">{event.label}</span>
+          <span className="text-[10px] text-slate-500 shrink-0">{formatTime(event.startTime)}</span>
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-slate-500">
+          <span>{label}</span>
+          <span>•</span>
+          <span>{tokenUsageText}</span>
+          {event.type === 'tool' && (
+            <>
+              <span>•</span>
+              <span>{(event.data as ChainToolCallSummary).durationMs}ms</span>
+            </>
+          )}
+        </div>
+      </div>
+      
+      <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-slate-600 transition-colors" />
+    </div>
+  )
+}
+
+const TimelineEventModal = ({ event, onClose }: { event: TaskTimelineEvent; onClose: () => void }) => {
+  return (
+    <Modal open={true} onCancel={onClose} footer={null} width={600} centered>
+      <div className="p-4">
+        <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <div className={cn(
+              'w-3 h-3 rounded-full',
+              event.type === 'run' ? 'bg-blue-500' :
+              event.type === 'input' ? 'bg-emerald-500' :
+              event.type === 'output' ? 'bg-amber-500' :
+              'bg-purple-500'
+            )} />
+            <span className="text-sm font-bold uppercase text-slate-500">
+              {event.type}
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded transition-colors">
+            <Minimize2 className="w-4 h-4 text-slate-400" />
+          </button>
+        </div>
+        
+        {event.type === 'tool' && <ToolDetailContent tool={event.data as ChainToolCallSummary} />}
+        {event.type === 'run' && <RunDetailContent run={event.data as RunTreeNode} />}
+        {(event.type === 'input' || event.type === 'output') && (
+          <TokenDetailContent data={event.data as any} type={event.type} />
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+const ToolDetailContent = ({ tool }: { tool: ChainToolCallSummary }) => {
+  const inputTokens = tool.tokenUsage?.input ?? 0
+  const outputTokens = tool.tokenUsage?.output ?? 0
+  const totalTokens = tool.tokenUsage?.total ?? 0
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Tool Name</p>
+          <p className="text-sm font-bold text-slate-800 mono">{tool.toolName}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Duration</p>
+          <p className="text-sm font-bold text-slate-800">{tool.durationMs}ms</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Timestamp</p>
+          <p className="text-sm font-bold text-slate-800">{formatTime(tool.timestamp)}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Status</p>
+          <span className={cn(
+            'px-2 py-0.5 text-[10px] font-bold rounded-full',
+            tool.error ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+          )}>
+            {tool.error ? 'FAILED' : 'SUCCESS'}
+          </span>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[10px] text-slate-500 uppercase font-bold">Token Usage</p>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+            <p className="text-[9px] text-slate-500">Input</p>
+            <p className="text-sm font-bold text-slate-800 mono">{inputTokens.toLocaleString()}</p>
+          </div>
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+            <p className="text-[9px] text-slate-500">Output</p>
+            <p className="text-sm font-bold text-slate-800 mono">{outputTokens.toLocaleString()}</p>
+          </div>
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-2">
+            <p className="text-[9px] text-purple-600">Total</p>
+            <p className="text-sm font-bold text-purple-700 mono">{totalTokens.toLocaleString()}</p>
+            <p className="text-[9px] text-purple-600">{tool.tokenUsage?.estimated ? '估算' : tool.tokenUsage ? '实际' : '-'}</p>
+          </div>
+        </div>
+      </div>
+      
+      {tool.params && Object.keys(tool.params).length > 0 && (
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">Parameters</p>
+          <pre className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-x-auto max-h-64 overflow-y-auto">
+            {JSON.stringify(tool.params, null, 2)}
+          </pre>
+        </div>
+      )}
+      
+      {tool.result && (
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">Output</p>
+          <pre className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-x-auto max-h-64 overflow-y-auto">
+            {tool.result}
+          </pre>
+        </div>
+      )}
+      
+      {tool.error && (
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">Error</p>
+          <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg p-3">
+            {tool.error}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const RunDetailContent = ({ run }: { run: RunTreeNode }) => {
+  const inputResult = calculateCost(run.model || '', run.usage.input, 0)
+  const outputResult = calculateCost(run.model || '', 0, run.usage.output)
+  const totalResult = calculateCost(run.model || '', run.usage.input, run.usage.output)
+  
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Run ID</p>
+          <p className="text-xs font-bold text-slate-800 mono">{run.runId}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Model</p>
+          <p className="text-sm font-bold text-slate-800">{run.model || '-'}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Duration</p>
+          <p className="text-sm font-bold text-slate-800">{Math.floor(run.endTime - run.startTime)}ms</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Status</p>
+          <StatusBadge status={run.status} />
+        </div>
+      </div>
+      
+      <div className="space-y-2">
+        <p className="text-[10px] text-slate-500 uppercase font-bold">Token Usage</p>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+            <p className="text-[9px] text-slate-500">Input</p>
+            <p className="text-sm font-bold text-slate-800 mono">{run.usage.input.toLocaleString()}</p>
+            <p className="text-[9px] font-mono text-emerald-600">{inputResult.matched ? formatCost(inputResult.cost) : '未匹配'}</p>
+          </div>
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+            <p className="text-[9px] text-slate-500">Output</p>
+            <p className="text-sm font-bold text-slate-800 mono">{run.usage.output.toLocaleString()}</p>
+            <p className="text-[9px] font-mono text-emerald-600">{outputResult.matched ? formatCost(outputResult.cost) : '未匹配'}</p>
+          </div>
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2">
+            <p className="text-[9px] text-emerald-600">Total</p>
+            <p className="text-sm font-bold text-emerald-700 mono">{run.usage.total.toLocaleString()}</p>
+            <p className="text-[9px] font-mono text-emerald-600">{totalResult.matched ? formatCost(totalResult.cost) : '未匹配'}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const TokenDetailContent = ({ data, type }: { data: any; type: 'input' | 'output' }) => {
+  const tokens = type === 'input' ? data.inputTokens : data.outputTokens
+  const result = calculateCost(data.model || '', type === 'input' ? tokens : 0, type === 'output' ? tokens : 0)
+  
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Type</p>
+          <p className="text-sm font-bold text-slate-800">{type === 'input' ? 'Input Tokens' : 'Output Tokens'}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase font-bold">Model</p>
+          <p className="text-sm font-bold text-slate-800">{data.model || '-'}</p>
+        </div>
+      </div>
+      
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+        <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Tokens</p>
+        <p className="text-2xl font-bold text-slate-800 mono">{tokens?.toLocaleString()}</p>
+        <p className="text-[10px] font-mono text-emerald-600 mt-1">{result.matched ? formatCost(result.cost) : '价格未匹配'}</p>
+      </div>
+    </div>
+  )
+}
+// ==================== Task Timeline 组件结束 ====================
+
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
@@ -51,6 +402,12 @@ interface ChainToolCallSummary extends ToolCallSummary {
   runId: string
   result?: string
   status?: 'success' | 'error' | 'pending'
+  tokenUsage?: {
+    input: number
+    output: number
+    total: number
+    estimated?: boolean
+  }
 }
 
 const formatTime = (ts: number) =>
@@ -95,6 +452,7 @@ const mapToolCallsFromChain = (chainData: ChainResponse): ChainToolCallSummary[]
   for (const item of items) {
     if (item.type === 'tool_call') {
       const key = item.id || `${item.timestamp}-${item.metadata?.toolName || 'tool'}`
+      const tokenUsage = extractToolTokenUsageFromItem(item)
       calls.set(key, {
         runId: item.runId,
         toolName: item.metadata?.toolName || 'Unknown Tool',
@@ -102,6 +460,7 @@ const mapToolCallsFromChain = (chainData: ChainResponse): ChainToolCallSummary[]
         timestamp: item.timestamp,
         durationMs: item.duration,
         params: asParamsRecord(item.input?.params),
+        tokenUsage,
         status: item.metadata?.status,
         error:
           item.metadata?.status === 'error'
@@ -114,9 +473,11 @@ const mapToolCallsFromChain = (chainData: ChainResponse): ChainToolCallSummary[]
       const key = item.id
       const found = key ? calls.get(key) : undefined
       const resultText = extractOutputTextFromItem(item)
+      const usageFromResult = extractToolTokenUsageFromItem(item)
       if (found) {
         if (item.duration != null) found.durationMs = item.duration
         if (resultText) found.result = resultText
+        found.tokenUsage = mergeToolUsage(found.tokenUsage, usageFromResult)
         if (item.metadata?.status) found.status = item.metadata.status
         if (item.metadata?.status === 'error') {
           found.error = item.metadata.error || found.error || 'Tool call failed'
@@ -129,6 +490,7 @@ const mapToolCallsFromChain = (chainData: ChainResponse): ChainToolCallSummary[]
           toolCallId: key,
           timestamp: item.timestamp,
           durationMs: item.duration,
+          tokenUsage: usageFromResult,
           status: item.metadata?.status,
           result: resultText || undefined,
           error:
@@ -164,7 +526,7 @@ const formatDuration = (durationMs?: number) => {
 }
 
 // 从 pricing 工具导入（动态从 API 获取，无硬编码）
-import { calculateCost, formatCost, ensurePricingLoaded, getPricingStatus } from './utils/pricing'
+import { calculateCost, formatCost, ensurePricingLoaded } from './utils/pricing'
 
 const extractUserTaskFromPrompt = (raw: string): string => {
   if (!raw) return ''
@@ -198,10 +560,95 @@ const normalizeLlmOutput = (value: unknown): string => {
     return String(value)
   }
 }
+const toNonNegativeNumber = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.max(0, value)
+}
+const extractUsageLike = (
+  value: unknown
+): { input: number; output: number; total: number } | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const input =
+    toNonNegativeNumber(record.input) ??
+    toNonNegativeNumber(record.prompt) ??
+    toNonNegativeNumber(record.promptTokens) ??
+    toNonNegativeNumber(record.prompt_tokens) ??
+    toNonNegativeNumber(record.inputTokens) ??
+    toNonNegativeNumber(record.input_tokens)
+  const output =
+    toNonNegativeNumber(record.output) ??
+    toNonNegativeNumber(record.completion) ??
+    toNonNegativeNumber(record.completionTokens) ??
+    toNonNegativeNumber(record.completion_tokens) ??
+    toNonNegativeNumber(record.outputTokens) ??
+    toNonNegativeNumber(record.output_tokens)
+  const total =
+    toNonNegativeNumber(record.total) ??
+    toNonNegativeNumber(record.totalTokens) ??
+    toNonNegativeNumber(record.total_tokens)
+  const hasAny = input != null || output != null || total != null
+  if (!hasAny) return undefined
+  const normalizedInput = input ?? 0
+  const normalizedOutput = output ?? 0
+  const normalizedTotal = total ?? normalizedInput + normalizedOutput
+  return { input: normalizedInput, output: normalizedOutput, total: normalizedTotal }
+}
+const estimateTokensByText = (value: unknown): number => {
+  if (value == null) return 0
+  if (typeof value === 'string') return Math.max(0, Math.ceil(value.length / 4))
+  try {
+    const text = JSON.stringify(value)
+    return text ? Math.max(0, Math.ceil(text.length / 4)) : 0
+  } catch {
+    return 0
+  }
+}
+const extractToolTokenUsageFromItem = (
+  item: ChainResponse['chain'][number]
+): { input: number; output: number; total: number; estimated?: boolean } | undefined => {
+  const fromUsage = extractUsageLike(item.usage)
+  if (fromUsage) return fromUsage
+  const fromOutputResult = extractUsageLike(item.output?.result)
+  if (fromOutputResult) return fromOutputResult
+  const inputEstimated = estimateTokensByText(item.input?.params)
+  const outputEstimated = estimateTokensByText(item.output?.result) + estimateTokensByText(item.output?.text)
+  const totalEstimated = inputEstimated + outputEstimated
+  if (totalEstimated === 0) return undefined
+  return {
+    input: inputEstimated,
+    output: outputEstimated,
+    total: totalEstimated,
+    estimated: true,
+  }
+}
+const mergeToolUsage = (
+  prev?: { input: number; output: number; total: number; estimated?: boolean },
+  next?: { input: number; output: number; total: number; estimated?: boolean }
+) => {
+  if (!next) return prev
+  if (!prev) return next
+  const prevScore = prev.estimated ? 0 : prev.total + 1
+  const nextScore = next.estimated ? 0 : next.total + 1
+  if (nextScore >= prevScore) return next
+  return prev
+}
 const buildRunTreeSignature = (tree: RunTreeNode[]): string =>
   tree
     .map((node) => `${node.runId}:${node.startTime}:${node.endTime}:${node.children.length}:${node.requestCount}`)
     .join('|')
+const collectRunSubtree = (nodes: RunTreeNode[]): RunTreeNode[] => {
+  const result: RunTreeNode[] = []
+  const seen = new Set<string>()
+  const walk = (node: RunTreeNode) => {
+    if (seen.has(node.runId)) return
+    seen.add(node.runId)
+    result.push(node)
+    node.children.forEach((child) => walk(child))
+  }
+  nodes.forEach((node) => walk(node))
+  return result
+}
 interface TaskMenuNode {
   taskId: string
   children: TaskMenuNode[]
@@ -303,6 +750,30 @@ const deriveTaskMenuData = (tasks: TaskData[], roots: RunTreeNode[]) => {
   }
 }
 
+const resolveDateFilterRange = (filter: { date?: string; startDate?: string; endDate?: string }) => {
+  if (filter.date) {
+    const start = new Date(`${filter.date}T00:00:00.000`).getTime()
+    const end = new Date(`${filter.date}T23:59:59.999`).getTime()
+    return { start, end }
+  }
+  const start = filter.startDate ? new Date(`${filter.startDate}T00:00:00.000`).getTime() : undefined
+  const end = filter.endDate ? new Date(`${filter.endDate}T23:59:59.999`).getTime() : undefined
+  return { start, end }
+}
+
+const filterTasksByDate = (
+  tasks: TaskData[],
+  filter: { date?: string; startDate?: string; endDate?: string }
+) => {
+  const { start, end } = resolveDateFilterRange(filter)
+  if (start === undefined && end === undefined) return tasks
+  return tasks.filter((task) => {
+    if (start !== undefined && task.startTime < start) return false
+    if (end !== undefined && task.startTime > end) return false
+    return true
+  })
+}
+
 // --- StatusBadge (from ui) ---
 type RunStatus = 'success' | 'running' | 'error' | 'unknown'
 const StatusBadge = ({ status }: { status: RunStatus }) => {
@@ -342,7 +813,6 @@ interface RunListItemProps {
   onSelect: (node: RunTreeNode) => void
   isLast?: boolean
   parentIsLast?: boolean[]
-  pricingLoaded?: boolean  // 价格数据是否已加载
 }
 
 const RunListItem = ({
@@ -351,7 +821,6 @@ const RunListItem = ({
   selectedId,
   onSelect,
   isLast = true,
-  pricingLoaded = false,
   parentIsLast = [],
 }: RunListItemProps) => {
   const isSelected = selectedId === node.runId
@@ -455,9 +924,9 @@ const RunListItem = ({
                     </span>
                     <span className={cn(
                       "text-[8px] font-mono",
-                      !pricingLoaded ? "text-slate-400" : inputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                      inputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
                     )}>
-                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (inputResult.matched ? formatCost(inputResult.cost) : '未匹配')}
+                      {inputResult.matched ? formatCost(inputResult.cost) : '未匹配'}
                     </span>
                   </div>
                 </div>
@@ -469,9 +938,9 @@ const RunListItem = ({
                     </span>
                     <span className={cn(
                       "text-[8px] font-mono",
-                      !pricingLoaded ? "text-slate-400" : outputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                      outputResult.matched ? "text-emerald-600" : "text-slate-400 italic"
                     )}>
-                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (outputResult.matched ? formatCost(outputResult.cost) : '未匹配')}
+                      {outputResult.matched ? formatCost(outputResult.cost) : '未匹配'}
                     </span>
                   </div>
                 </div>
@@ -484,9 +953,9 @@ const RunListItem = ({
                     </span>
                     <span className={cn(
                       "text-[8px] font-mono font-bold",
-                      !pricingLoaded ? "text-slate-400" : totalResult.matched ? "text-emerald-600" : "text-slate-400 italic"
+                      totalResult.matched ? "text-emerald-600" : "text-slate-400 italic"
                     )}>
-                      {!pricingLoaded ? <RefreshCw className="w-3 h-3 animate-spin" /> : (totalResult.matched ? formatCost(totalResult.cost) : '未匹配')}
+                      {totalResult.matched ? formatCost(totalResult.cost) : '未匹配'}
                     </span>
                   </div>
                 </div>
@@ -512,7 +981,6 @@ const RunListItem = ({
               onSelect={onSelect}
               isLast={idx === node.children.length - 1}
               parentIsLast={[...parentIsLast, isLast]}
-              pricingLoaded={pricingLoaded}
             />
           ))}
         </div>
@@ -848,281 +1316,7 @@ const TokenTreemap = ({ runs }: { runs: RunTreeNode[] }) => {
   )
 }
 
-// --- GitGraph 执行流：树形展示任务内调用链（含工具与子代理） ---
-type GraphNodeKind = 'agent' | 'subagent' | 'tool'
-
-interface GraphNode {
-  id: string
-  label: string
-  kind: GraphNodeKind
-  /** 垂直阶段（同一 row 代表同一阶段，体现“并行”） */
-  row: number
-  /** 水平泳道：0 = 父，1+ = 各子 / 工具分支 */
-  lane: number
-  runId?: string
-  usage?: { input: number; output: number; total: number }
-  status?: RunStatus
-  fullData?: RunTreeNode
-  toolName?: string
-  durationMs?: number
-}
-
-interface GraphEdge {
-  from: GraphNode
-  to: GraphNode
-  type: 'branch'
-  label?: string
-}
-
-// 树形布局：lane 表示深度，row 表示遍历顺序，包含 run + tool + 子 run 全节点
-function buildGitGraph(node: RunTreeNode): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  const nodes: GraphNode[] = []
-  const edges: GraphEdge[] = []
-  let row = 0
-  const walk = (run: RunTreeNode, depth: number, parent?: GraphNode) => {
-    const runNode: GraphNode = {
-      id: `run-${run.runId}`,
-      label: run.runId.substring(0, 8),
-      kind: (run.sessionKey ?? '').includes('subagent') || depth > 0 ? 'subagent' : 'agent',
-      row: row++,
-      lane: depth,
-      runId: run.runId,
-      usage: run.usage,
-      status: run.status,
-      fullData: run,
-    }
-    nodes.push(runNode)
-    if (parent) edges.push({ from: parent, to: runNode, type: 'branch' })
-
-    run.toolCalls.forEach((tool, idx) => {
-      const toolNode: GraphNode = {
-        id: tool.toolCallId ?? `tool-${run.runId}-${idx}`,
-        label: tool.toolName,
-        kind: 'tool',
-        row: row++,
-        lane: depth + 1,
-        toolName: tool.toolName,
-        durationMs: tool.durationMs,
-      }
-      nodes.push(toolNode)
-      edges.push({ from: runNode, to: toolNode, type: 'branch' })
-    })
-
-    run.children.forEach((child) => walk(child, depth + 1, runNode))
-  }
-
-  walk(node, 0)
-  return { nodes, edges }
-}
-
-const ROW_H = 56
-const NODE_R = 10
-const TRUNK_X = 24
-const BRANCH_DX = 140
-
-const GitGraphVisualizer = ({ data }: { data: RunTreeNode }) => {
-  const svgRef = useRef<SVGSVGElement>(null)
-  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null)
-
-  const { nodes, edges } = useMemo(() => buildGitGraph(data), [data])
-
-  useEffect(() => {
-    if (!svgRef.current || nodes.length === 0) return
-    const margin = { top: 20, right: 20, bottom: 20, left: 20 }
-    const maxRow = d3.max(nodes, (d) => d.row) ?? 0
-    const maxLane = d3.max(nodes, (d) => d.lane) ?? 0
-    const width = Math.max(320, TRUNK_X + (maxLane + 1) * BRANCH_DX)
-    const height = (maxRow + 1) * ROW_H
-    const svg = d3.select(svgRef.current)
-    svg.selectAll('*').remove()
-    svg.attr('width', width + margin.left + margin.right)
-    svg.attr('height', height + margin.top + margin.bottom)
-
-    const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`)
-    const xScale = (lane: number) => TRUNK_X + lane * BRANCH_DX
-    const yScale = (row: number) => row * ROW_H + ROW_H / 2
-
-    const colors: Record<GraphNodeKind, string> = {
-      agent: '#0ea5e9',
-      subagent: '#8b5cf6',
-      tool: '#f59e0b',
-    }
-
-    edges.forEach((e) => {
-      const x1 = xScale(e.from.lane)
-      const y1 = yScale(e.from.row)
-      const x2 = xScale(e.to.lane)
-      const y2 = yScale(e.to.row)
-      const midY = (y1 + y2) / 2
-      const pts: [number, number][] = [
-        [x1, y1],
-        [x1, midY],
-        [x2, midY],
-        [x2, y2],
-      ]
-      const line = d3.line<[number, number]>().curve(d3.curveBasis)
-      g.append('path')
-        .attr('d', line(pts))
-        .attr('fill', 'none')
-        .attr('stroke', '#94a3b8')
-        .attr('stroke-width', 2)
-        .attr('stroke-dasharray', '0')
-        .attr('opacity', 0.9)
-    })
-
-    const nodeGroups = g
-      .selectAll('.g-node')
-      .data(nodes)
-      .enter()
-      .append('g')
-      .attr('class', 'g-node')
-      .attr('transform', (d) => `translate(${xScale(d.lane)},${yScale(d.row)})`)
-      .on('mouseenter', (_event, d) => setHoveredNode(d))
-      .on('mouseleave', () => setHoveredNode(null))
-
-    nodeGroups
-      .append('circle')
-      .attr('r', NODE_R)
-      .attr('fill', (d) => colors[d.kind])
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 2)
-      .attr('class', 'cursor-pointer')
-
-    nodeGroups
-      .append('text')
-      .attr('x', NODE_R + 8)
-      .attr('y', 4)
-      .attr('font-size', '11px')
-      .attr('font-weight', '600')
-      .attr('fill', '#334155')
-      .attr('class', 'pointer-events-none')
-      .text((d) => d.label)
-
-    nodeGroups
-      .filter((d) => d.kind !== 'tool')
-      .append('text')
-      .attr('x', NODE_R + 8)
-      .attr('y', 18)
-      .attr('font-size', '10px')
-      .attr('fill', '#64748b')
-      .attr('class', 'pointer-events-none mono')
-      .text((d) => {
-        if (d.usage) return `Σ ${d.usage.total.toLocaleString()}`
-        if (d.durationMs != null) return `${(d.durationMs / 1000).toFixed(1)}s`
-        return ''
-      })
-  }, [nodes, edges])
-
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden relative">
-      <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
-        <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-          <GitBranch className="w-4 h-4 text-purple-500" />
-          调用链视图（树形）
-        </h3>
-        <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
-          用户任务 · 子代理 · 工具节点
-        </span>
-      </div>
-      <div className="overflow-y-auto overflow-x-auto p-4 bg-slate-50/20 min-h-[240px] max-h-[720px]">
-        <svg ref={svgRef} className="block" width={800} height={1200} style={{ minHeight: 200 }} />
-      </div>
-      <AnimatePresence>
-        {hoveredNode && (
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            className="absolute top-20 right-6 w-64 bg-slate-900/95 backdrop-blur text-white p-4 rounded-xl shadow-2xl border border-white/10 z-50"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold uppercase text-purple-400">
-                {hoveredNode.kind}
-              </span>
-              {hoveredNode.status != null && (
-                <StatusBadge status={hoveredNode.status} />
-              )}
-            </div>
-            <p className="mono text-xs font-bold mb-3 truncate">
-              {hoveredNode.toolName ?? hoveredNode.label}
-            </p>
-            {hoveredNode.usage && (
-              <div className="space-y-2">
-                {(() => {
-                  const model = hoveredNode.fullData?.model || ''
-                  const inputResult = calculateCost(model, hoveredNode.usage.input, 0)
-                  const outputResult = calculateCost(model, 0, hoveredNode.usage.output)
-                  const totalResult = calculateCost(model, hoveredNode.usage.input, hoveredNode.usage.output)
-                  
-                  return (
-                    <>
-                      <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
-                        <div>
-                          <span className="text-[8px] text-slate-400 uppercase block">Input</span>
-                          <span className="text-xs font-bold mono text-white">
-                            {hoveredNode.usage.input.toLocaleString()}
-                          </span>
-                        </div>
-                        <span className={cn(
-                          "text-xs font-bold mono",
-                          inputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
-                        )}>
-                          {inputResult.matched ? formatCost(inputResult.cost) : '未匹配'}
-                        </span>
-                      </div>
-                      <div className="bg-white/5 p-2 rounded-lg flex justify-between items-center">
-                        <div>
-                          <span className="text-[8px] text-slate-400 uppercase block">Output</span>
-                          <span className="text-xs font-bold mono text-white">
-                            {hoveredNode.usage.output.toLocaleString()}
-                          </span>
-                        </div>
-                        <span className={cn(
-                          "text-xs font-bold mono",
-                          outputResult.matched ? "text-emerald-400" : "text-slate-500 italic"
-                        )}>
-                          {outputResult.matched ? formatCost(outputResult.cost) : '未匹配'}
-                        </span>
-                      </div>
-                      <div className="bg-emerald-500/10 p-2 rounded-lg flex justify-between items-center border border-emerald-500/20">
-                        <div>
-                          <span className="text-[8px] text-emerald-400 uppercase font-bold block">
-                            Total Tokens
-                          </span>
-                          <span className="text-xs font-bold mono text-emerald-300">
-                            {hoveredNode.usage.total.toLocaleString()}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="bg-emerald-500/20 p-2 rounded-lg flex justify-between items-center border border-emerald-500/30">
-                        <span className="text-[8px] text-emerald-300 uppercase font-bold">
-                          Total Cost
-                        </span>
-                        <span className={cn(
-                          "text-xs font-bold mono",
-                          totalResult.matched ? "text-emerald-300" : "text-slate-500 italic"
-                        )}>
-                          {totalResult.matched ? formatCost(totalResult.cost) : '未匹配'}
-                        </span>
-                      </div>
-                    </>
-                  )
-                })()}
-              </div>
-            )}
-            {hoveredNode.durationMs != null && (
-              <p className="text-[10px] text-slate-400 mt-2">
-                耗时 {hoveredNode.durationMs}ms
-              </p>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
-// --- 全局总览：执行时间线 + 统计 ---
+// ==================== 全局总览：执行时间线 + 统计 ====================
 interface TimelineEvent {
   id: string
   type: 'run' | 'tool' | 'input' | 'output'
@@ -1601,6 +1795,7 @@ const GlobalOverview = ({
 export default function App() {
   const [roots, setRoots] = useState<RunTreeNode[]>([])
   const rootsSignatureRef = useRef('')
+  const pollingInFlightRef = useRef(false)
   const [tasks, setTasks] = useState<TaskData[]>([])
   const [selectedRun, setSelectedRun] = useState<RunTreeNode | null>(null)
   const selectedRunRef = useRef<RunTreeNode | null>(null)
@@ -1611,24 +1806,18 @@ export default function App() {
   const [leftPanelMode, setLeftPanelMode] = useState<'run' | 'task'>('task')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<'overview' | 'run'>('run')
+  const [viewMode, setViewMode] = useState<'overview' | 'task'>('task')
   const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap' | 'pricing'>('timeline')
   const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>({})
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [isClearingCache, setIsClearingCache] = useState(false)
   const [selectedRunChainToolCalls, setSelectedRunChainToolCalls] = useState<ChainToolCallSummary[] | null>(null)
   const [selectedTaskToolCalls, setSelectedTaskToolCalls] = useState<ChainToolCallSummary[] | null>(null)
-  
-  // 价格加载状态
-  const [pricingLoaded, setPricingLoaded] = useState(false)
+  const [selectedTaskResolvedRunIds, setSelectedTaskResolvedRunIds] = useState<string[]>([])
+  const [selectedTaskRunsLoading, setSelectedTaskRunsLoading] = useState(false)
   
   useEffect(() => {
-    const loadPricing = async () => {
-      await ensurePricingLoaded()
-      const status = getPricingStatus()
-      setPricingLoaded(status.loaded)
-    }
-    loadPricing()
+    ensurePricingLoaded()
   }, [])
 
   const handleLocate = useCallback((runId: string) => {
@@ -1643,7 +1832,12 @@ export default function App() {
         runId: node.runId,
       })
       setSelectedRun(node)
-      setViewMode('run')
+      const ownerTask = tasks.find((task) => task.runIds.includes(runId))
+      if (ownerTask) {
+        setSelectedTaskId(ownerTask.taskId)
+      }
+      setLeftPanelMode('task')
+      setViewMode('task')
       setTimeout(() => {
         const el = document.getElementById(`run-item-${runId}`)
         if (el) {
@@ -1653,7 +1847,7 @@ export default function App() {
         }
       }, 100)
     }
-  }, [roots])
+  }, [roots, tasks])
 
   useEffect(() => {
     selectedRunRef.current = selectedRun
@@ -1664,22 +1858,124 @@ export default function App() {
     () => (selectedTaskId ? taskMenuData.taskById.get(selectedTaskId) ?? null : null),
     [selectedTaskId, taskMenuData]
   )
-  const selectedTaskWorkflowRun = useMemo(() => {
-    if (!selectedTask) return null
-    const runNodes = selectedTask.runIds
-      .map((runId) => findRunInTree(roots, runId))
-      .filter((runNode): runNode is RunTreeNode => runNode != null)
-    if (runNodes.length === 0) return null
-
-    const runIdSet = new Set(runNodes.map((runNode) => runNode.runId))
+  const selectedTaskStats = useMemo(() => {
+    if (!selectedTask) {
+      return {
+        llmCalls: 0,
+        toolCalls: 0,
+        subagentSpawns: 0,
+        totalInput: 0,
+        totalOutput: 0,
+        totalTokens: 0,
+        estimatedCost: 0,
+      }
+    }
+    return {
+      llmCalls: selectedTask.stats?.llmCalls ?? 0,
+      toolCalls: selectedTask.stats?.toolCalls ?? 0,
+      subagentSpawns: selectedTask.stats?.subagentSpawns ?? 0,
+      totalInput: selectedTask.stats?.totalInput ?? 0,
+      totalOutput: selectedTask.stats?.totalOutput ?? 0,
+      totalTokens: selectedTask.stats?.totalTokens ?? 0,
+      estimatedCost: selectedTask.stats?.estimatedCost ?? 0,
+    }
+  }, [selectedTask])
+  useEffect(() => {
+    const controller = new AbortController()
+    if (!selectedTask) {
+      setSelectedTaskRunsLoading(false)
+      setSelectedTaskResolvedRunIds([])
+      return
+    }
+    if (selectedTask.runIds.length > 0) {
+      setSelectedTaskRunsLoading(false)
+      setSelectedTaskResolvedRunIds(selectedTask.runIds)
+      return
+    }
+    setSelectedTaskRunsLoading(true)
+    ;(async () => {
+      const fallbackRunIds = await fetchTaskRunIds(selectedTask.taskId, 400)
+      if (controller.signal.aborted) return
+      setSelectedTaskResolvedRunIds(fallbackRunIds)
+      setSelectedTaskRunsLoading(false)
+    })()
+    return () => {
+      controller.abort()
+    }
+  }, [selectedTask])
+  const selectedTaskRunNodes = useMemo(
+    () =>
+      selectedTask
+        ? selectedTaskResolvedRunIds
+            .map((runId) => findRunInTree(roots, runId))
+            .filter((runNode): runNode is RunTreeNode => runNode != null)
+        : [],
+    [selectedTask, selectedTaskResolvedRunIds, roots]
+  )
+  const selectedTaskWorkflowRoots = useMemo(() => {
+    if (selectedTaskRunNodes.length === 0) return []
+    const runIdSet = new Set(selectedTaskRunNodes.map((runNode) => runNode.runId))
     const childIdSet = new Set<string>()
-    runNodes.forEach((runNode) => {
+    selectedTaskRunNodes.forEach((runNode) => {
       runNode.children.forEach((child) => {
         if (runIdSet.has(child.runId)) childIdSet.add(child.runId)
       })
     })
-    const rootRuns = runNodes.filter((runNode) => !childIdSet.has(runNode.runId))
-    const workflowRoots = rootRuns.length > 0 ? rootRuns : runNodes
+    const rootRuns = selectedTaskRunNodes.filter((runNode) => !childIdSet.has(runNode.runId))
+    return rootRuns.length > 0 ? rootRuns : selectedTaskRunNodes
+  }, [selectedTaskRunNodes])
+  const selectedTaskAllRunNodes = useMemo(
+    () => collectRunSubtree(selectedTaskWorkflowRoots),
+    [selectedTaskWorkflowRoots]
+  )
+  const selectedTaskAllRunIds = useMemo(
+    () => selectedTaskAllRunNodes.map((runNode) => runNode.runId),
+    [selectedTaskAllRunNodes]
+  )
+  const selectedTaskDataLoading = selectedTaskRunsLoading || taskPromptLoading
+  const selectedTaskFallbackToolCalls = useMemo<ChainToolCallSummary[]>(
+    () =>
+      selectedTaskAllRunNodes.flatMap((runNode) =>
+        runNode.toolCalls.map((tool, idx) => ({
+          ...tool,
+          runId: runNode.runId,
+          toolCallId: tool.toolCallId ?? `${runNode.runId}-${tool.timestamp}-${idx}`,
+          status: (tool.error ? 'error' : 'success') as 'error' | 'success',
+        }))
+      ),
+    [selectedTaskAllRunNodes]
+  )
+  const selectedTaskDisplayStats = useMemo(() => {
+    const aggregated = selectedTaskAllRunNodes.reduce(
+      (acc, runNode) => ({
+        totalInput: acc.totalInput + runNode.usage.input,
+        totalOutput: acc.totalOutput + runNode.usage.output,
+        totalTokens: acc.totalTokens + runNode.usage.total,
+      }),
+      { totalInput: 0, totalOutput: 0, totalTokens: 0 }
+    )
+    const taskTokenSum = selectedTaskStats.totalInput + selectedTaskStats.totalOutput
+    const displayInput = selectedTaskStats.totalInput > 0 ? selectedTaskStats.totalInput : aggregated.totalInput
+    const displayOutput = selectedTaskStats.totalOutput > 0 ? selectedTaskStats.totalOutput : aggregated.totalOutput
+    const displayTotal =
+      selectedTaskStats.totalTokens > 0
+        ? selectedTaskStats.totalTokens
+        : taskTokenSum > 0
+          ? taskTokenSum
+          : aggregated.totalTokens
+    return {
+      ...selectedTaskStats,
+      llmCalls: Math.max(selectedTaskStats.llmCalls, selectedTaskAllRunNodes.length),
+      toolCalls: Math.max(selectedTaskStats.toolCalls, selectedTaskFallbackToolCalls.length),
+      totalInput: displayInput,
+      totalOutput: displayOutput,
+      totalTokens: displayTotal,
+    }
+  }, [selectedTaskStats, selectedTaskAllRunNodes, selectedTaskFallbackToolCalls])
+  const selectedTaskWorkflowRun = useMemo(() => {
+    if (!selectedTask) return null
+    const workflowRoots = selectedTaskWorkflowRoots
+    if (workflowRoots.length === 0) return null
     if (workflowRoots.length === 1) return workflowRoots[0]
 
     const usage = workflowRoots.reduce(
@@ -1712,11 +2008,11 @@ export default function App() {
       children: workflowRoots,
       toolCalls: [],
     }
-  }, [selectedTask, roots])
+  }, [selectedTask, selectedTaskWorkflowRoots])
 
   useEffect(() => {
     const controller = new AbortController()
-    if (!selectedTask || selectedTask.runIds.length === 0) {
+    if (!selectedTask || selectedTaskAllRunIds.length === 0) {
       setSelectedTaskUserPrompt(null)
       setSelectedTaskLlmOutput(null)
       setSelectedTaskToolCalls(null)
@@ -1724,7 +2020,7 @@ export default function App() {
       return
     }
 
-    const runCandidates = [...selectedTask.runIds]
+    const runCandidates = [...selectedTaskAllRunIds]
 
     setTaskPromptLoading(true)
     setSelectedTaskUserPrompt(null)
@@ -1766,7 +2062,13 @@ export default function App() {
       if (!controller.signal.aborted) setSelectedTaskUserPrompt(foundPrompt)
       if (!controller.signal.aborted) setSelectedTaskLlmOutput(latestOutput?.text ?? null)
       if (!controller.signal.aborted) {
-        setSelectedTaskToolCalls(allToolCalls.sort((a, b) => a.timestamp - b.timestamp))
+        const merged = [...selectedTaskFallbackToolCalls, ...allToolCalls]
+        const deduped = new Map<string, ChainToolCallSummary>()
+        for (const tool of merged) {
+          const key = `${tool.toolCallId ?? ''}:${tool.runId}:${tool.timestamp}:${tool.toolName}`
+          deduped.set(key, tool)
+        }
+        setSelectedTaskToolCalls(Array.from(deduped.values()).sort((a, b) => a.timestamp - b.timestamp))
       }
       if (!controller.signal.aborted) setTaskPromptLoading(false)
     })()
@@ -1774,7 +2076,7 @@ export default function App() {
     return () => {
       controller.abort()
     }
-  }, [selectedTask])
+  }, [selectedTask, selectedTaskAllRunIds, selectedTaskFallbackToolCalls])
 
   useEffect(() => {
     if (taskMenuData.rootTaskIds.length === 0) {
@@ -1813,43 +2115,55 @@ export default function App() {
   const loadData = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
-    const [raw, latestTasks] = await Promise.all([
-      loadLocalStore(dateFilter),
-      fetchTasks({ limit: 100 }),
-    ])
-    setTasks(latestTasks)
-    if (!raw) {
-      setLoadError(
-        '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
-      )
-      setRoots([])
-      setSelectedRun(null)
-    } else {
-      const tree = buildRunTree(raw)
-        logRunListDebug('load-initial-data-success', {
-          rootsCount: tree.length,
-          firstRunId: tree[0]?.runId ?? null,
-        })
-      rootsSignatureRef.current = buildRunTreeSignature(tree)
-      setRoots(tree)
-      
-      // Try to preserve selection
-      if (selectedRunRef.current) {
-        const found = findRunInTree(tree, selectedRunRef.current.runId)
-        if (found) {
-          setSelectedRun(found)
+    try {
+      const [raw, latestTasks] = await Promise.all([
+        loadLocalStore(dateFilter),
+        fetchTasks({ limit: 100 }),
+      ])
+      setTasks(filterTasksByDate(latestTasks, dateFilter))
+      if (!raw) {
+        setLoadError(
+          '无法连接后端实时数据接口，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
+        )
+        setRoots([])
+        setSelectedRun(null)
+      } else {
+        const tree = buildRunTree(raw)
+          logRunListDebug('load-initial-data-success', {
+            rootsCount: tree.length,
+            firstRunId: tree[0]?.runId ?? null,
+          })
+        rootsSignatureRef.current = buildRunTreeSignature(tree)
+        setRoots(tree)
+        if (latestTasks.length === 0 && tree.length > 0) {
+          setLeftPanelMode('task')
+        }
+        
+        if (selectedRunRef.current) {
+          const found = findRunInTree(tree, selectedRunRef.current.runId)
+          if (found) {
+            setSelectedRun(found)
+          } else if (tree.length > 0) {
+            setSelectedRun(tree[0])
+          } else {
+            setSelectedRun(null)
+          }
         } else if (tree.length > 0) {
           setSelectedRun(tree[0])
         } else {
           setSelectedRun(null)
         }
-      } else if (tree.length > 0) {
-        setSelectedRun(tree[0])
-      } else {
-        setSelectedRun(null)
       }
+    } catch (error) {
+      console.error('Failed to load initial data:', error)
+      setLoadError(
+        '实时数据加载超时，请确认 OpenClaw 网关与 /plugins/contextscope/api 可访问。'
+      )
+      setRoots([])
+      setSelectedRun(null)
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }, [dateFilter])
 
   useEffect(() => {
@@ -1860,71 +2174,107 @@ export default function App() {
     const pollInterval = setInterval(async () => {
       // 只有在没有日期过滤且在概览模式下才自动刷新，或者根据需求调整
       if (Object.keys(dateFilter).length === 0) {
-        const realTimeData = await loadRealTimeData()
-        if (realTimeData && realTimeData.requests.length > 0) {
-          console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
-          const tree = buildRunTree(realTimeData)
-          const nextSignature = buildRunTreeSignature(tree)
-          if (nextSignature === rootsSignatureRef.current) return
-          rootsSignatureRef.current = nextSignature
-          setRoots(tree)
-          // 保持当前选中的 run（如果还存在）
-          const currentSelectedRun = selectedRunRef.current
-          if (currentSelectedRun) {
-            const stillExists = findRunInTree(tree, currentSelectedRun.runId)
-            if (stillExists) {
-              setSelectedRun(stillExists)
+        if (pollingInFlightRef.current) return
+        pollingInFlightRef.current = true
+        try {
+          const realTimeData = await loadRealTimeData()
+          if (realTimeData && realTimeData.requests.length > 0) {
+            console.log('[Real-time] New data from API:', realTimeData.requests.length, 'requests')
+            const tree = buildRunTree(realTimeData)
+            const nextSignature = buildRunTreeSignature(tree)
+            if (nextSignature === rootsSignatureRef.current) return
+            rootsSignatureRef.current = nextSignature
+            setRoots(tree)
+            // 保持当前选中的 run（如果还存在）
+            const currentSelectedRun = selectedRunRef.current
+            if (currentSelectedRun) {
+              const stillExists = findRunInTree(tree, currentSelectedRun.runId)
+              if (stillExists) {
+                setSelectedRun(stillExists)
+              }
             }
           }
+        } finally {
+          pollingInFlightRef.current = false
         }
       }
-    }, 5000) // 5 秒轮询一次
+    }, 15000)
     
     return () => clearInterval(pollInterval)
   }, [loadData, dateFilter])
 
   const handleClearCache = async (all: boolean = false) => {
-    if (!all && !dateFilter.date) {
-      if (dateFilter.startDate || dateFilter.endDate) {
-        message.warning('暂不支持清除日期范围，请先选择单个日期进行清除')
-      } else {
-        message.warning('请先选择要清除的日期')
+    const selectedDates = (() => {
+      if (dateFilter.date) return [dateFilter.date]
+      const start = dateFilter.startDate
+      const end = dateFilter.endDate
+      if (!start && !end) return []
+      const rangeStart = start ?? end!
+      const rangeEnd = end ?? start!
+      const from = new Date(`${rangeStart}T00:00:00.000`)
+      const to = new Date(`${rangeEnd}T00:00:00.000`)
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return []
+      const [minTime, maxTime] = from.getTime() <= to.getTime()
+        ? [from.getTime(), to.getTime()]
+        : [to.getTime(), from.getTime()]
+      const dates: string[] = []
+      for (let cursor = minTime; cursor <= maxTime; cursor += 24 * 60 * 60 * 1000) {
+        dates.push(new Date(cursor).toISOString().slice(0, 10))
       }
+      return dates
+    })()
+    if (!all && selectedDates.length === 0) {
+      message.warning('请先选择要清除的日期')
       return
     }
+    if (!all && selectedDates.length > 31) {
+      message.warning('日期范围最多支持 31 天，请缩小范围后重试')
+      return
+    }
+    const clearTargetText = all
+      ? '所有缓存'
+      : selectedDates.length === 1
+        ? `${selectedDates[0]} 的缓存`
+        : `${selectedDates[0]} 到 ${selectedDates[selectedDates.length - 1]} 的缓存（共 ${selectedDates.length} 天）`
 
     Modal.confirm({
       title: '确认清除缓存',
-      content: all ? '确定要清除所有缓存吗？此操作不可恢复。' : `确定要清除 ${dateFilter.date} 的缓存吗？此操作不可恢复。`,
+      content: `确定要清除 ${clearTargetText} 吗？此操作不可恢复。`,
       okText: '确定',
       cancelText: '取消',
       okType: 'danger',
       onOk: async () => {
         setIsClearingCache(true)
         try {
-          const params = new URLSearchParams()
           if (all) {
+            const params = new URLSearchParams()
             params.append('all', 'true')
-          } else if (dateFilter.date) {
-            params.append('date', dateFilter.date)
-          } else {
-            message.warning('请先选择具体日期再清除缓存')
-            setIsClearingCache(false)
-            return
-          }
-    
-          const res = await fetch(`/plugins/contextscope/api/cache?${params.toString()}`, {
-            method: 'DELETE'
-          })
-          
-          if (res.ok) {
+            const res = await fetch(`/plugins/contextscope/api/cache?${params.toString()}`, {
+              method: 'DELETE'
+            })
+            if (!res.ok) {
+              const err = await res.json()
+              message.error(`清除失败: ${err.error}`)
+              return
+            }
             message.success('缓存清除成功')
-            await loadData() // Reload data
-            setShowDatePicker(false) // 关闭日期选择器
           } else {
-            const err = await res.json()
-            message.error(`清除失败: ${err.error}`)
+            for (const date of selectedDates) {
+              const params = new URLSearchParams()
+              params.append('date', date)
+              const res = await fetch(`/plugins/contextscope/api/cache?${params.toString()}`, {
+                method: 'DELETE'
+              })
+              if (!res.ok) {
+                const err = await res.json()
+                message.error(`清除失败: ${err.error}`)
+                return
+              }
+            }
+            message.success(`缓存清除成功（${selectedDates.length} 天）`)
           }
+          await loadData()
+          setShowDatePicker(false)
         } catch (e) {
           console.error('Failed to clear cache:', e)
           message.error('清除失败')
@@ -1947,15 +2297,26 @@ export default function App() {
     selectedRunChainToolCalls !== null
       ? selectedRunChainToolCalls
       : (selectedRun?.toolCalls ?? [])
-  const loadedCountLabel =
-    leftPanelMode === 'task'
-      ? `${taskMenuData.rootTaskIds.length} 个用户任务`
-      : `${roots.length} 个大模型调用`
+  const loadedCountLabel = `${taskMenuData.rootTaskIds.length} 个用户任务`
+  const runTokenUsageById = useMemo(() => {
+    const usageMap = new Map<string, number>()
+    const walk = (node: RunTreeNode) => {
+      usageMap.set(node.runId, node.usage.total)
+      node.children.forEach((child) => walk(child))
+    }
+    roots.forEach((rootNode) => walk(rootNode))
+    return usageMap
+  }, [roots])
   const inputRatio =
     totalTokens > 0 ? (selectedRun!.usage.input / totalTokens) * 100 : 0
   const renderTaskMenuNode = (node: TaskMenuNode, depth: number = 0): JSX.Element | null => {
     const task = taskMenuData.taskById.get(node.taskId)
     if (!task) return null
+    const fallbackTokenTotal = task.runIds.reduce(
+      (sum, runId) => sum + (runTokenUsageById.get(runId) ?? 0),
+      0
+    )
+    const displayTokenTotal = task.stats.totalTokens > 0 ? task.stats.totalTokens : fallbackTokenTotal
     return (
       <div key={node.taskId}>
         <div className={cn('px-4', depth > 0 && 'pl-7')}>
@@ -1968,7 +2329,11 @@ export default function App() {
                 : 'bg-white border-slate-200 hover:bg-slate-50'
             )}
             style={{ marginLeft: `${depth * 10}px` }}
-            onClick={() => setSelectedTaskId(task.taskId)}
+            onClick={() => {
+              setSelectedTaskId(task.taskId)
+              setLeftPanelMode('task')
+              setViewMode('task')
+            }}
           >
             <div className="flex items-center justify-between gap-2">
               <span className="mono text-[11px] font-bold text-slate-700">
@@ -1986,7 +2351,7 @@ export default function App() {
             <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
               <span>{formatFullTime(task.startTime)}</span>
               <span>
-                {(task.stats.totalTokens || 0).toLocaleString()} Token
+                {displayTokenTotal.toLocaleString()} Token
                 {(node.children.length ?? 0) > 0
                   ? ` · +${node.children.length} subAgents`
                   : ''}
@@ -2101,11 +2466,11 @@ export default function App() {
                           disabled={isClearingCache}
                           className={cn(
                             "flex-1 px-2 py-1.5 text-xs border rounded-lg flex items-center justify-center gap-1",
-                            !dateFilter.date 
+                            !(dateFilter.date || dateFilter.startDate || dateFilter.endDate)
                               ? "border-slate-200 text-slate-400 cursor-not-allowed bg-slate-50"
                               : "border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer"
                           )}
-                          title={dateFilter.date ? "清除当前选中日期的缓存" : "请先选择单个日期"}
+                          title={dateFilter.date || dateFilter.startDate || dateFilter.endDate ? "清除当前选中日期或范围的缓存" : "请先选择日期或日期范围"}
                         >
                           <Trash2 className="w-3 h-3" />
                           清除当前
@@ -2152,35 +2517,9 @@ export default function App() {
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
-                placeholder={leftPanelMode === 'task' ? '搜索用户任务 ID...' : '搜索大模型调用 ID...'}
+                placeholder="搜索用户任务 ID..."
                 className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
               />
-            </div>
-            <div className="flex bg-slate-200 p-1 rounded-lg mt-3">
-              <button
-                type="button"
-                onClick={() => setLeftPanelMode('task')}
-                className={cn(
-                  'flex-1 px-3 py-1 text-[11px] font-bold rounded-md transition-all',
-                  leftPanelMode === 'task'
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
-                )}
-              >
-                用户任务视图
-              </button>
-              <button
-                type="button"
-                onClick={() => setLeftPanelMode('run')}
-                className={cn(
-                  'flex-1 px-3 py-1 text-[11px] font-bold rounded-md transition-all',
-                  leftPanelMode === 'run'
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
-                )}
-              >
-                大模型调用视图
-              </button>
             </div>
           </div>
           <div className="flex-1 overflow-y-auto">
@@ -2196,345 +2535,68 @@ export default function App() {
                 </button>
               </div>
             )}
-            {leftPanelMode === 'run' ? (
-              <>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    setLeftPanelMode('run')
-                    setViewMode('overview')
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setLeftPanelMode('run')
-                      setViewMode('overview')
-                    }
-                  }}
-                  className={cn(
-                    'mx-4 mt-4 mb-2 p-4 rounded-xl cursor-pointer transition-all border',
-                    viewMode === 'overview'
-                      ? 'bg-blue-600 text-white border-blue-700 shadow-md'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                  )}
-                >
-                  <div className="flex items-center gap-3">
-                    <LayoutDashboard
-                      className={cn('w-5 h-5', viewMode === 'overview' ? 'text-white' : 'text-blue-500')}
-                    />
-                    <span className="text-sm font-bold">全局总览</span>
-                  </div>
-                  <p
-                    className={cn(
-                      'text-[10px] mt-1',
-                      viewMode === 'overview' ? 'text-blue-100' : 'text-slate-400'
-                    )}
-                  >
-                    查看所有大模型调用链的时间线与统计
-                  </p>
-                </div>
-                <div className="px-4 py-2">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                    大模型调用列表
-                  </p>
-                </div>
-                {!loading && !loadError && roots.length === 0 && (
-                  <div className="mx-4 p-4 text-slate-500 text-xs">
-                    暂无大模型调用
-                  </div>
+            
+            {/* 全局总览入口 */}
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                setViewMode('overview')
+                setLeftPanelMode('run')
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  setViewMode('overview')
+                  setLeftPanelMode('run')
+                }
+              }}
+              className={cn(
+                'mx-4 mt-4 mb-2 p-4 rounded-xl cursor-pointer transition-all border',
+                viewMode === 'overview'
+                  ? 'bg-blue-600 text-white border-blue-700 shadow-md'
+                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <LayoutDashboard
+                  className={cn('w-5 h-5', viewMode === 'overview' ? 'text-white' : 'text-blue-500')}
+                />
+                <span className="text-sm font-bold">全局总览</span>
+              </div>
+              <p
+                className={cn(
+                  'text-[10px] mt-1',
+                  viewMode === 'overview' ? 'text-blue-100' : 'text-slate-400'
                 )}
-                {roots.map((run) => (
-                  <RunListItem
-                    key={run.runId}
-                    node={run}
-                    selectedId={viewMode === 'run' ? selectedRun?.runId ?? '' : ''}
-                    pricingLoaded={pricingLoaded}
-                    onSelect={(node) => {
-                      logRunListDebug('select-run-from-list', {
-                        runId: node.runId,
-                        previousSelectedRunId: selectedRun?.runId ?? null,
-                        currentViewMode: viewMode,
-                      })
-                      setSelectedRun(node)
-                      setLeftPanelMode('run')
-                      setViewMode('run')
-                    }}
-                  />
-                ))}
-              </>
-            ) : (
-              <>
-                <div className="px-4 pt-4 pb-2">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                    用户任务列表
-                  </p>
-                </div>
-                {!loading && !loadError && taskMenuData.rootNodes.length === 0 && (
-                  <div className="mx-4 p-4 text-slate-500 text-xs">
-                    暂无用户任务
-                  </div>
-                )}
-                {taskMenuData.rootNodes.map((node) => renderTaskMenuNode(node))}
-              </>
+              >
+                查看所有用户任务的时间线与统计
+              </p>
+            </div>
+            
+            {/* 用户任务列表 */}
+            <div className="px-4 pt-4 pb-2">
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                用户任务列表
+              </p>
+            </div>
+            {!loading && !loadError && taskMenuData.rootNodes.length === 0 && (
+              <div className="mx-4 p-4 text-slate-500 text-xs">
+                暂无用户任务
+              </div>
             )}
+            {loading && !loadError && (
+              <div className="mx-4 p-4 text-slate-500 text-xs animate-pulse">
+                用户任务加载中...
+              </div>
+            )}
+            {taskMenuData.rootNodes.map((node) => renderTaskMenuNode(node))}
           </div>
         </aside>
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-8 bg-slate-50/30">
           <AnimatePresence mode="wait">
-            {leftPanelMode === 'task' ? (
-              !selectedTask ? (
-                <motion.div
-                  key="empty-task"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="max-w-5xl mx-auto py-20 text-center text-slate-500"
-                >
-                  在左侧点击一个用户任务查看详情
-                </motion.div>
-              ) : (
-                <motion.div
-                  key={selectedTask.taskId}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
-                  transition={{ duration: 0.2 }}
-                  className="max-w-5xl mx-auto space-y-8"
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="space-y-1">
-                      <h2 className="mono text-2xl font-bold text-slate-800 tracking-tight break-all">
-                        {selectedTask.taskId}
-                      </h2>
-                      <div className="flex items-center gap-4 text-sm text-slate-500">
-                        <span className="mono text-[11px] bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
-                          {selectedTask.sessionId}
-                        </span>
-                        <span className="flex items-center gap-1.5">
-                          <Clock className="w-4 h-4" />
-                          {formatFullTime(selectedTask.startTime)}
-                        </span>
-                        <span className="text-[11px] text-slate-400">
-                          耗时 {formatDuration(selectedTask.duration)}
-                        </span>
-                      </div>
-                    </div>
-                    <span
-                      className={cn(
-                        'px-3 py-1 text-[11px] font-semibold rounded-full border',
-                        taskStatusClass[selectedTask.status] || 'bg-slate-100 text-slate-700 border-slate-200'
-                      )}
-                    >
-                      {taskStatusText[selectedTask.status] || selectedTask.status}
-                    </span>
-                  </div>
-                  {(() => {
-                    const model = selectedTaskWorkflowRun?.model || ''
-                    const inputResult = calculateCost(model, selectedTask.stats.totalInput, 0)
-                    const outputResult = calculateCost(model, 0, selectedTask.stats.totalOutput)
-                    const totalResult = calculateCost(model, selectedTask.stats.totalInput, selectedTask.stats.totalOutput)
-                    
-                    return (
-                      <div className="grid grid-cols-5 gap-4">
-                        {[
-                          { 
-                            label: 'Input Tokens', 
-                            value: selectedTask.stats.totalInput.toLocaleString(),
-                            subValue: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
-                            matched: inputResult.matched,
-                            isCost: false 
-                          },
-                          { 
-                            label: 'Output Tokens', 
-                            value: selectedTask.stats.totalOutput.toLocaleString(),
-                            subValue: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
-                            matched: outputResult.matched,
-                            isCost: false 
-                          },
-                          { 
-                            label: 'Total Tokens', 
-                            value: selectedTask.stats.totalTokens.toLocaleString(),
-                            subValue: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
-                            matched: totalResult.matched,
-                            isCost: false 
-                          },
-                          { label: 'LLM Calls', value: selectedTask.stats.llmCalls.toLocaleString(), isCost: false },
-                          { 
-                            label: 'Total Cost', 
-                            value: totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配', 
-                            matched: totalResult.matched,
-                            isCost: true
-                          },
-                        ].map((stat) => (
-                          <div
-                            key={stat.label}
-                            className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm"
-                          >
-                            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
-                              {stat.label}
-                            </p>
-                            {stat.subValue ? (
-                              <>
-                                <p className="text-lg font-bold text-slate-900 mono">
-                                  {stat.value}
-                                </p>
-                                <p className={cn(
-                                  "text-[11px] font-bold mono mt-0.5",
-                                  stat.matched ? "text-emerald-600" : "text-slate-400 italic"
-                                )}>
-                                  {stat.subValue}
-                                </p>
-                              </>
-                            ) : (
-                              <p className={cn(
-                                "text-2xl font-bold mono",
-                                stat.isCost ? "text-emerald-600" : "text-slate-900"
-                              )}>
-                                {stat.value}
-                              </p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  })()}
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-3">用户发起任务（User Prompt）</h3>
-                    {taskPromptLoading ? (
-                      <p className="text-xs text-slate-500">加载中...</p>
-                    ) : selectedTaskUserPrompt ? (
-                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
-                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
-                          {selectedTaskUserPrompt}
-                        </p>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500">未获取到用户发起任务内容</p>
-                    )}
-                  </div>
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-3">最终文字回复（Final Output）</h3>
-                    {taskPromptLoading ? (
-                      <p className="text-xs text-slate-500">加载中...</p>
-                    ) : selectedTaskLlmOutput ? (
-                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
-                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
-                          {selectedTaskLlmOutput}
-                        </p>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500">未获取到 LLM 输出内容</p>
-                    )}
-                  </div>
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-3">工具调用明细（参数与输出）</h3>
-                    {taskPromptLoading ? (
-                      <p className="text-xs text-slate-500">加载中...</p>
-                    ) : selectedTaskToolCalls && selectedTaskToolCalls.length > 0 ? (
-                      <div className="space-y-3">
-                        {selectedTaskToolCalls.map((tool, index) => (
-                          <div
-                            key={`${tool.toolCallId ?? `${tool.runId}-${tool.timestamp}`}-${index}`}
-                            className="bg-slate-50 rounded-xl border border-slate-200 p-4"
-                          >
-                            <div className="flex items-center justify-between gap-4">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="mono text-sm font-bold text-slate-800 truncate">
-                                  {tool.toolName}
-                                </span>
-                                <span className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded px-2 py-0.5">
-                                  {tool.runId.substring(0, 12)}...
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-2 text-[11px] text-slate-500 shrink-0">
-                                <span>{formatTime(tool.timestamp)}</span>
-                                {tool.durationMs != null && <span>{tool.durationMs}ms</span>}
-                                <span
-                                  className={cn(
-                                    'px-2 py-0.5 rounded-full border font-semibold',
-                                    tool.error
-                                      ? 'bg-rose-100 text-rose-700 border-rose-200'
-                                      : 'bg-emerald-100 text-emerald-700 border-emerald-200'
-                                  )}
-                                >
-                                  {tool.error ? '失败' : '成功'}
-                                </span>
-                              </div>
-                            </div>
-                            {tool.params && Object.keys(tool.params).length > 0 && (
-                              <div className="mt-3">
-                                <p className="text-[11px] font-semibold text-slate-500 mb-1">Params</p>
-                                <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded-lg p-3 whitespace-pre-wrap break-words overflow-x-auto">
-                                  {JSON.stringify(tool.params, null, 2)}
-                                </pre>
-                              </div>
-                            )}
-                            {tool.result && (
-                              <div className="mt-3">
-                                <p className="text-[11px] font-semibold text-slate-500 mb-1">Output</p>
-                                <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded-lg p-3 whitespace-pre-wrap break-words overflow-x-auto">
-                                  {tool.result}
-                                </pre>
-                              </div>
-                            )}
-                            {tool.error && (
-                              <p className="mt-3 text-xs text-rose-600 whitespace-pre-wrap break-words">
-                                {tool.error}
-                              </p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500">当前任务未采集到工具调用明细</p>
-                    )}
-                  </div>
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-2">任务调用链工作流</h3>
-                    <p className="text-xs text-slate-500 mb-4">
-                      按用户要求展示任务调用链（含工具与子代理节点）
-                    </p>
-                    {selectedTaskWorkflowRun ? (
-                      <GitGraphVisualizer data={selectedTaskWorkflowRun} />
-                    ) : (
-                      <p className="text-xs text-slate-500">当前任务暂无可展示的调用链</p>
-                    )}
-                  </div>
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-sm font-bold text-slate-800 mb-4">
-                      关联大模型调用 ({selectedTask.runIds.length})
-                    </h3>
-                    {selectedTask.runIds.length === 0 ? (
-                      <p className="text-xs text-slate-500">当前用户任务暂无大模型调用</p>
-                    ) : (
-                      <div className="flex flex-wrap gap-2">
-                        {selectedTask.runIds.map((runId) => (
-                          <button
-                            type="button"
-                            key={runId}
-                            className="mono text-[11px] px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 hover:bg-blue-50 hover:border-blue-200"
-                            onClick={() => {
-                              const node = findRunInTree(roots, runId)
-                              if (!node) {
-                                message.warning('该大模型调用不在当前列表，请切换日期范围后重试')
-                                return
-                              }
-                              setSelectedRun(node)
-                              setLeftPanelMode('run')
-                              setViewMode('run')
-                            }}
-                          >
-                            {runId}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              )
-            ) : viewMode === 'overview' ? (
+            {viewMode === 'overview' ? (
               <motion.div
                 key="overview"
                 initial={{ opacity: 0, x: 20 }}
@@ -2589,6 +2651,182 @@ export default function App() {
                   <PricingTable />
                 )}
               </motion.div>
+            ) : leftPanelMode === 'task' ? (
+              !selectedTask ? (
+                <motion.div
+                  key="empty-task"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="max-w-5xl mx-auto py-20 text-center text-slate-500"
+                >
+                  {loading ? (
+                    <div className="inline-flex items-center gap-2 text-slate-500">
+                      <Activity className="w-4 h-4 animate-spin" />
+                      <span>数据加载中，请稍候...</span>
+                    </div>
+                  ) : (
+                    '在左侧点击一个用户任务查看详情'
+                  )}
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={selectedTask.taskId}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.2 }}
+                  className="max-w-5xl mx-auto space-y-8"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="space-y-1">
+                      <h2 className="mono text-2xl font-bold text-slate-800 tracking-tight break-all">
+                        {selectedTask.taskId}
+                      </h2>
+                      <div className="flex items-center gap-4 text-sm text-slate-500">
+                        <span className="mono text-[11px] bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                          {selectedTask.sessionId}
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="w-4 h-4" />
+                          {formatFullTime(selectedTask.startTime)}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          耗时 {formatDuration(selectedTask.duration)}
+                        </span>
+                      </div>
+                    </div>
+                    <span
+                      className={cn(
+                        'px-3 py-1 text-[11px] font-semibold rounded-full border',
+                        taskStatusClass[selectedTask.status] || 'bg-slate-100 text-slate-700 border-slate-200'
+                      )}
+                    >
+                      {taskStatusText[selectedTask.status] || selectedTask.status}
+                    </span>
+                  </div>
+                  {(() => {
+                    const model = selectedTaskWorkflowRun?.model || ''
+                    const inputResult = calculateCost(model, selectedTaskDisplayStats.totalInput, 0)
+                    const outputResult = calculateCost(model, 0, selectedTaskDisplayStats.totalOutput)
+                    const totalResult = calculateCost(model, selectedTaskDisplayStats.totalInput, selectedTaskDisplayStats.totalOutput)
+                    
+                    return (
+                      <div className="grid grid-cols-5 gap-4">
+                        {[
+                          { 
+                            label: 'Input Tokens', 
+                            value: selectedTaskDisplayStats.totalInput.toLocaleString(),
+                            subValue: inputResult.matched ? formatCost(inputResult.cost) : '未匹配',
+                            matched: inputResult.matched,
+                            isCost: false 
+                          },
+                          { 
+                            label: 'Output Tokens', 
+                            value: selectedTaskDisplayStats.totalOutput.toLocaleString(),
+                            subValue: outputResult.matched ? formatCost(outputResult.cost) : '未匹配',
+                            matched: outputResult.matched,
+                            isCost: false 
+                          },
+                          { 
+                            label: 'Total Tokens', 
+                            value: selectedTaskDisplayStats.totalTokens.toLocaleString(),
+                            subValue: totalResult.matched ? formatCost(totalResult.cost) : '未匹配',
+                            matched: totalResult.matched,
+                            isCost: false 
+                          },
+                          { label: 'LLM Calls', value: selectedTaskDisplayStats.llmCalls.toLocaleString(), isCost: false },
+                          { 
+                            label: 'Total Cost', 
+                            value: totalResult.matched ? formatCost(totalResult.cost) : '价格未匹配', 
+                            matched: totalResult.matched,
+                            isCost: true
+                          },
+                        ].map((stat) => (
+                          <div
+                            key={stat.label}
+                            className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm"
+                          >
+                            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">
+                              {stat.label}
+                            </p>
+                            {stat.subValue ? (
+                              <>
+                                <p className="text-lg font-bold text-slate-900 mono">
+                                  {stat.value}
+                                </p>
+                                <p className={cn(
+                                  "text-[11px] font-bold mono mt-0.5",
+                                  stat.matched ? "text-emerald-600" : "text-slate-400 italic"
+                                )}>
+                                  {stat.subValue}
+                                </p>
+                              </>
+                            ) : (
+                              <p className={cn(
+                                "text-2xl font-bold mono",
+                                stat.isCost ? "text-emerald-600" : "text-slate-900"
+                              )}>
+                                {stat.value}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  })()}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">用户发起任务（User Prompt）</h3>
+                    {selectedTaskDataLoading ? (
+                      <p className="text-xs text-slate-500">加载中...</p>
+                    ) : selectedTaskUserPrompt ? (
+                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
+                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
+                          {selectedTaskUserPrompt}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">未获取到用户发起任务内容</p>
+                    )}
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                    <h3 className="text-sm font-bold text-slate-800 mb-3">最终文字回复（Final Output）</h3>
+                    {selectedTaskDataLoading ? (
+                      <p className="text-xs text-slate-500">加载中...</p>
+                    ) : selectedTaskLlmOutput ? (
+                      <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
+                        <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-6">
+                          {selectedTaskLlmOutput}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">未获取到 LLM 输出内容</p>
+                    )}
+                  </div>
+                  
+                  {/* Context 分析 */}
+                  {selectedTaskResolvedRunIds.length > 0 && (
+                    <ContextDistribution runId={selectedTaskResolvedRunIds[0]} />
+                  )}
+                  {selectedTaskDataLoading && selectedTaskResolvedRunIds.length === 0 && (
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                      <p className="text-xs text-slate-500">加载上下文分析中...</p>
+                    </div>
+                  )}
+                  {!selectedTaskDataLoading && selectedTaskResolvedRunIds.length === 0 && (
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                      <p className="text-xs text-slate-500">暂无可用调用链上下文</p>
+                    </div>
+                  )}
+                  
+                  <TaskTimeline 
+                    runs={selectedTaskAllRunNodes}
+                    toolCalls={selectedTaskToolCalls ?? []}
+                    loading={selectedTaskDataLoading}
+                  />
+                  
+                </motion.div>
+              )
             ) : !selectedRun ? (
               <motion.div
                 key="empty"
@@ -2597,7 +2835,14 @@ export default function App() {
                 exit={{ opacity: 0 }}
                 className="max-w-5xl mx-auto py-20 text-center text-slate-500"
               >
-                在左侧点击一个大模型调用查看详情
+                {loading ? (
+                  <div className="inline-flex items-center gap-2 text-slate-500">
+                    <Activity className="w-4 h-4 animate-spin" />
+                    <span>数据加载中，请稍候...</span>
+                  </div>
+                ) : (
+                  '在左侧点击一个大模型调用查看详情'
+                )}
               </motion.div>
             ) : (
               <motion.div

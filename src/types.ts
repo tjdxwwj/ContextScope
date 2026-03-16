@@ -85,7 +85,14 @@ export interface ActiveTask {
 export interface TaskTreeNode {
   task: TaskData;
   children: TaskTreeNode[];
-  aggregatedStats: (TaskMeta & TaskTokenStats) & {
+  aggregatedStats: {
+    llmCalls: number;
+    toolCalls: number;
+    subagentSpawns: number;
+    totalInput: number;
+    totalOutput: number;
+    totalTokens: number;
+    estimatedCost: number;
     depth: number;
     descendantCount: number;
   };

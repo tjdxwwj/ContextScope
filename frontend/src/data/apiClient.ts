@@ -6,6 +6,11 @@
 import type { RawStore, RequestData, SubagentLinkData, ToolCallData } from './rawTypes'
 
 const API_BASE = '/plugins/contextscope/api'
+const API_REQUEST_TIMEOUT_MS = 25000
+const API_AUX_TIMEOUT_MS = 6000
+const REQUEST_LIST_LIMIT = 200
+const REQUEST_FETCH_MAX_ATTEMPTS = 2
+const REQUEST_FETCH_RETRY_DELAY_MS = 350
 const CONTEXT_CACHE_TTL_MS = 8000
 const CONTEXT_FETCH_MAX_ATTEMPTS = 2
 const CONTEXT_FETCH_RETRY_DELAY_MS = 300
@@ -114,12 +119,94 @@ export interface TaskData {
   }
 }
 
+const EMPTY_TASK_STATS: TaskStats = {
+  llmCalls: 0,
+  toolCalls: 0,
+  subagentSpawns: 0,
+  totalInput: 0,
+  totalOutput: 0,
+  totalTokens: 0,
+  estimatedCost: 0,
+}
+
+function normalizeTask(task: any): TaskData {
+  const statsCandidate = task?.stats ?? task?.tokenStats ?? {}
+  return {
+    ...task,
+    stats: {
+      llmCalls: Number(statsCandidate.llmCalls ?? task?.llmCalls ?? EMPTY_TASK_STATS.llmCalls),
+      toolCalls: Number(statsCandidate.toolCalls ?? task?.toolCalls ?? EMPTY_TASK_STATS.toolCalls),
+      subagentSpawns: Number(
+        statsCandidate.subagentSpawns ?? task?.subagentSpawns ?? EMPTY_TASK_STATS.subagentSpawns
+      ),
+      totalInput: Number(statsCandidate.totalInput ?? EMPTY_TASK_STATS.totalInput),
+      totalOutput: Number(statsCandidate.totalOutput ?? EMPTY_TASK_STATS.totalOutput),
+      totalTokens: Number(statsCandidate.totalTokens ?? EMPTY_TASK_STATS.totalTokens),
+      estimatedCost: Number(statsCandidate.estimatedCost ?? EMPTY_TASK_STATS.estimatedCost),
+    },
+    runIds: Array.isArray(task?.runIds) ? task.runIds : [],
+  } as TaskData
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
 export interface TaskTreeNode {
   task: TaskData
   children: TaskTreeNode[]
   aggregatedStats: TaskStats & {
     depth: number
     descendantCount: number
+  }
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs: number = API_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export interface RequestDetailsResponse {
+  runId: string
+  requests: RequestData[]
+  toolCalls: ToolCallData[]
+  subagentLinks: SubagentLinkData[]
+}
+
+export async function fetchRequestDetails(runId: string, limit: number = 200): Promise<RequestDetailsResponse | null> {
+  if (!runId) return null
+  try {
+    const params = new URLSearchParams()
+    params.append('runId', runId)
+    params.append('limit', String(limit))
+    const res = await fetchWithTimeout(
+      `${API_BASE}/requests/detail?${params.toString()}`,
+      {},
+      API_REQUEST_TIMEOUT_MS
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      runId: data?.runId ?? runId,
+      requests: Array.isArray(data?.requests) ? data.requests : [],
+      toolCalls: Array.isArray(data?.toolCalls) ? data.toolCalls : [],
+      subagentLinks: Array.isArray(data?.subagentLinks) ? data.subagentLinks : [],
+    }
+  } catch (error) {
+    console.error('Failed to fetch request details:', error)
+    return null
   }
 }
 
@@ -136,11 +223,11 @@ export async function fetchTasks(params?: {
     if (params?.limit != null) query.append('limit', String(params.limit))
     if (params?.offset != null) query.append('offset', String(params.offset))
     const suffix = query.toString() ? `?${query.toString()}` : ''
-    const res = await fetch(`${API_BASE}/tasks${suffix}`)
+    const res = await fetchWithTimeout(`${API_BASE}/tasks${suffix}`, {}, API_REQUEST_TIMEOUT_MS)
     if (!res.ok) return []
     const data = await res.json()
     const payload = data?.data ?? data
-    return Array.isArray(payload?.tasks) ? payload.tasks : []
+    return Array.isArray(payload?.tasks) ? payload.tasks.map(normalizeTask) : []
   } catch (error) {
     console.error('Failed to fetch tasks:', error)
     return []
@@ -160,16 +247,65 @@ export async function fetchTaskTree(taskId: string): Promise<TaskTreeNode | null
   }
 }
 
-export async function fetchRequests(filter?: DateFilter): Promise<RawStore | null> {
+export async function fetchTaskRunIds(taskId: string, limit: number = 200): Promise<string[]> {
+  if (!taskId) return []
   try {
     const params = new URLSearchParams()
+    params.append('full', 'false')
+    params.append('taskId', taskId)
+    params.append('limit', String(limit))
+    const res = await fetchWithTimeout(
+      `${API_BASE}/requests?${params.toString()}`,
+      {},
+      API_REQUEST_TIMEOUT_MS
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    const requests = Array.isArray(data?.requests) ? data.requests : []
+    const runIds = new Set<string>()
+    for (const item of requests) {
+      const runId = typeof item?.runId === 'string' ? item.runId.trim() : ''
+      if (runId) runIds.add(runId)
+    }
+    return Array.from(runIds)
+  } catch (error) {
+    if (!isAbortError(error)) {
+      console.error('Failed to fetch task run ids:', error)
+    }
+    return []
+  }
+}
+
+export async function fetchRequests(
+  filter?: DateFilter,
+  options?: { includeAux?: boolean }
+): Promise<RawStore | null> {
+  try {
+    const includeAux = options?.includeAux !== false
+    const params = new URLSearchParams()
+    params.append('full', 'false')
+    params.append('limit', String(REQUEST_LIST_LIMIT))
     if (filter?.date) params.append('date', filter.date)
     if (filter?.startDate) params.append('startDate', filter.startDate)
     if (filter?.endDate) params.append('endDate', filter.endDate)
 
     const queryString = params.toString() ? `?${params.toString()}` : ''
     
-    const res = await fetch(`${API_BASE}/requests${queryString}`)
+    let attempt = 1
+    let res: Response | null = null
+    while (attempt <= REQUEST_FETCH_MAX_ATTEMPTS) {
+      try {
+        res = await fetchWithTimeout(`${API_BASE}/requests${queryString}`, {}, API_REQUEST_TIMEOUT_MS)
+        break
+      } catch (error) {
+        if (!(isAbortError(error) && attempt < REQUEST_FETCH_MAX_ATTEMPTS)) {
+          throw error
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, REQUEST_FETCH_RETRY_DELAY_MS))
+        attempt += 1
+      }
+    }
+    if (!res) return null
     if (!res.ok) {
       console.error('API request failed:', res.status)
       return null
@@ -179,24 +315,30 @@ export async function fetchRequests(filter?: DateFilter): Promise<RawStore | nul
     let subagentLinks: SubagentLinkData[] = []
     let toolCalls: ToolCallData[] = []
     
-    try {
-      const linksRes = await fetch(`${API_BASE}/links${queryString}`)
-      if (linksRes.ok) {
-        const linksData = await linksRes.json()
-        subagentLinks = linksData.links || linksData.subagentLinks || []
+    if (includeAux) {
+      try {
+        const linksRes = await fetchWithTimeout(`${API_BASE}/links${queryString}`, {}, API_AUX_TIMEOUT_MS)
+        if (linksRes.ok) {
+          const linksData = await linksRes.json()
+          subagentLinks = linksData.links || linksData.subagentLinks || []
+        }
+      } catch (e) {
+        if (!isAbortError(e)) {
+          console.debug('Failed to fetch links:', e)
+        }
       }
-    } catch (e) {
-      console.debug('Failed to fetch links:', e)
-    }
-    
-    try {
-      const toolsRes = await fetch(`${API_BASE}/tool-calls${queryString}`)
-      if (toolsRes.ok) {
-        const toolsData = await toolsRes.json()
-        toolCalls = toolsData.toolCalls || []
+      
+      try {
+        const toolsRes = await fetchWithTimeout(`${API_BASE}/tool-calls${queryString}`, {}, API_AUX_TIMEOUT_MS)
+        if (toolsRes.ok) {
+          const toolsData = await toolsRes.json()
+          toolCalls = toolsData.toolCalls || []
+        }
+      } catch (e) {
+        if (!isAbortError(e)) {
+          console.debug('Failed to fetch tool calls:', e)
+        }
       }
-    } catch (e) {
-      console.debug('Failed to fetch tool calls:', e)
     }
     
     const result: RawStore = {
@@ -215,7 +357,9 @@ export async function fetchRequests(filter?: DateFilter): Promise<RawStore | nul
     }
     return result
   } catch (error) {
-    console.error('Failed to fetch from API:', error)
+    if (!isAbortError(error)) {
+      console.error('Failed to fetch from API:', error)
+    }
     return null
   }
 }
@@ -367,18 +511,8 @@ export interface ContextResponse {
   }
   tokenDistribution: {
     total: number
-    breakdown: {
-      systemPrompt: number
-      userPrompt: number;
-      history: number;
-      toolResponses: number;
-    }
-    percentages: {
-      systemPrompt: number;
-      userPrompt: number;
-      history: number;
-      toolResponses: number;
-    }
+    breakdown: Record<string, number>
+    percentages: Record<string, number>
   }
   modelInfo: {
     name: string
