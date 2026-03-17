@@ -17,6 +17,7 @@ export default defineConfig({
       }
     }
   },
+  base: '/plugins/contextscope/',
   build: {
     outDir: 'dist',
     emptyOutDir: true

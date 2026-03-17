@@ -1,5 +1,5 @@
 {
-  "id": "contextscope",
+  "id": "openclaw-contextscope",
   "name": "ContextScope",
   "description": "Visualize and analyze API requests, prompts, completions, and token usage in real-time",
   "uiHints": {

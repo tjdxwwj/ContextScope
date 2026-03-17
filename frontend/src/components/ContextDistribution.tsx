@@ -4,6 +4,7 @@ import * as d3 from 'd3'
 import { motion, AnimatePresence } from 'motion/react'
 import { Activity, ChevronRight, Copy, Loader2, Maximize2, Minimize2 } from 'lucide-react'
 import { fetchContext, type ContextResponse } from '../data/apiClient'
+import { useI18n } from '../i18n'
 
 interface ContextTreemapProps {
   runId: string
@@ -156,6 +157,7 @@ function HistoryList({ messages }: { messages: any[] }) {
 }
 
 export function ContextDistribution({ runId }: ContextTreemapProps) {
+  const { t } = useI18n()
   const [data, setData] = useState<ContextResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -215,7 +217,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
             requestSeq,
           })
           setData(null)
-          setLoadError('上下文分析接口暂无数据或请求超时')
+          setLoadError(t('context.errorNoData'))
         }
       } catch (e) {
         if (requestSeq !== requestSeqRef.current) {
@@ -240,7 +242,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
           error: e,
         })
         setData(null)
-        setLoadError('上下文分析加载失败')
+        setLoadError(t('context.errorLoadFailed'))
       } finally {
         if (requestSeq === requestSeqRef.current) {
           setLoading(false)
@@ -415,7 +417,7 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
           onClick={() => setRetryVersion((prev) => prev + 1)}
           className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
         >
-          重新请求
+          {t('context.retry')}
         </button>
       </div>
     )
@@ -426,11 +428,8 @@ export function ContextDistribution({ runId }: ContextTreemapProps) {
       <div>
         <h3 className="text-sm font-bold text-slate-800 mb-4 flex items-center gap-2">
           <Activity className="w-4 h-4 text-purple-500" />
-          Context 分布 ({data.tokenDistribution.total} tokens)
+          {t('context.distributionTitle')} ({data.tokenDistribution.total} {t('context.totalTokens')})
         </h3>
-        <p className="text-[11px] text-slate-500 -mt-2 mb-3">
-          口径说明：Context 为整段提示词总量（system + 当前用户 + 历史对话 + 工具结果），不等于单次 Input Tokens
-        </p>
         <div className="w-full overflow-hidden rounded-xl bg-slate-50">
           <svg ref={svgRef} className="w-full h-40 block" />
         </div>

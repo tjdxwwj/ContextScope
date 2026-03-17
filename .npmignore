@@ -1,3 +1,8 @@
+# Explicitly include frontend/dist (negate .gitignore's dist/ rule)
+!frontend/dist/**
+!frontend/dist/**/*
+
+# Ignore patterns
 .openclaw-state/
 frontend/public/data/requests.json
 docs/requests.json

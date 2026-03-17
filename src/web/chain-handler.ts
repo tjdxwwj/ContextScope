@@ -1,18 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RequestAnalyzerService } from '../service.js';
-import type { PluginConfig } from '../config.js';
 import type { PluginLogger } from '../types.js';
-import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FRONTEND_DIST_PATH = join(__dirname, '..', '..', 'frontend', 'dist');
-const FRONTEND_INDEX_PATH = join(FRONTEND_DIST_PATH, 'index.html');
-const isProduction = existsSync(FRONTEND_INDEX_PATH);
 
 export function createChainHttpHandler(params: { service: RequestAnalyzerService; logger: PluginLogger }) {
   const { service, logger } = params;
+  const sendJson = (res: ServerResponse, statusCode: number, payload: unknown): boolean => {
+    res.statusCode = statusCode;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(payload));
+    return true;
+  };
+  const toInt = (value: string | null, fallback: number): number => {
+    const parsed = Number.parseInt(value ?? '', 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -33,34 +34,22 @@ export function createChainHttpHandler(params: { service: RequestAnalyzerService
       const runId = pathParts[pathParts.length - 1];
       
       if (!runId || runId === 'chain') {
-        res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'runId is required' }));
-        return true;
+        return sendJson(res, 400, { error: 'runId is required' });
       }
 
-      const limit = parseInt(url.searchParams.get('limit') || '100');
-      const offset = parseInt(url.searchParams.get('offset') || '0');
+      const limit = toInt(url.searchParams.get('limit'), 100);
+      const offset = toInt(url.searchParams.get('offset'), 0);
 
       const chain = await service.getChain(runId, limit, offset);
       
       if (!chain) {
-        res.statusCode = 404;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'Chain not found' }));
-        return true;
+        return sendJson(res, 404, { error: 'Chain not found' });
       }
 
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify(chain));
-      return true;
+      return sendJson(res, 200, chain);
     } catch (error) {
       logger.error(`Failed to get chain: ${error}`);
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: 'Failed to get chain' }));
-      return true;
+      return sendJson(res, 500, { error: 'Failed to get chain' });
     }
   };
 }

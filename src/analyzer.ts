@@ -1,134 +1,33 @@
-/**
- * Context Analyzer Module
- * 
- * Provides deep analysis of request contexts including:
- * - Token distribution analysis
- * - Attention heatmap calculation
- * - Context evolution tracking
- * - Tool call dependency graph
- */
-
 import type { RequestData } from './storage.js';
-
-export interface TokenBreakdown {
-  systemPrompt: number;
-  historyMessages: number;
-  currentPrompt: number;
-  toolResponses: number;
-  totalInput: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-}
-
-export interface MessageImpact {
-  messageId: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  tokenCount: number;
-  impactScore: number; // 0-100
-  timestamp: number;
-}
-
-export interface ContextEvolution {
-  timestamp: number;
-  totalTokens: number;
-  messageCount: number;
-  compressionRatio: number;
-  summaryApplied: boolean;
-  windowUtilization: number; // 0-1
-}
-
-export interface ToolCallNode {
-  id: string;
-  name: string;
-  duration: number;
-  tokensUsed: number;
-  dependencies: string[];
-  status: 'success' | 'error' | 'pending';
-  children: string[];
-}
-
-export interface DependencyGraph {
-  nodes: ToolCallNode[];
-  edges: Array<{ from: string; to: string; weight: number }>;
-}
-
-export interface AnalysisResult {
-  runId: string;
-  sessionId: string;
-  tokenBreakdown: TokenBreakdown;
-  messageImpacts: MessageImpact[];
-  contextEvolution: ContextEvolution[];
-  dependencyGraph: DependencyGraph;
-  insights: AnalysisInsight[];
-  // Context Analysis
-  topicClusters: TopicCluster[];
-  contextSimilarities: ContextSimilarity[];
-  compressionSuggestions: ContextCompressionSuggestion[];
-  attentionDistribution: AttentionDistribution;
-  keyMessages: MessageImpact[];
-  contextHealth: {
-    score: number; // 0-100
-    issues: string[];
-    recommendations: string[];
-  };
-}
-
-export interface AnalysisInsight {
-  type: 'warning' | 'info' | 'optimization';
-  title: string;
-  description: string;
-  severity: 'low' | 'medium' | 'high';
-}
-
-export interface ContextSimilarity {
-  messageId: string;
-  similarTo: string;
-  similarityScore: number; // 0-1
-  topic: string;
-}
-
-export interface TopicCluster {
-  topic: string;
-  messageIds: string[];
-  keywords: string[];
-  percentage: number;
-}
-
-export interface ContextCompressionSuggestion {
-  type: 'remove' | 'summarize' | 'keep';
-  messageId: string;
-  reason: string;
-  tokenSavings: number;
-  impact: 'low' | 'medium' | 'high';
-}
-
-export interface AttentionDistribution {
-  systemPrompt: number; // 0-1
-  recentMessages: number; // 0-1
-  olderMessages: number; // 0-1
-  toolResponses: number; // 0-1
-}
+import { MODEL_CONTEXT_WINDOWS, STOP_WORDS } from './analyzer-constants.js';
+import type {
+  AnalysisInsight,
+  AnalysisResult,
+  AttentionDistribution,
+  ContextCompressionSuggestion,
+  ContextEvolution,
+  ContextSimilarity,
+  DependencyGraph,
+  MessageImpact,
+  ToolCallNode,
+  TokenBreakdown,
+  TopicCluster
+} from './analyzer-types.js';
+export type {
+  AnalysisInsight,
+  AnalysisResult,
+  AttentionDistribution,
+  ContextCompressionSuggestion,
+  ContextEvolution,
+  ContextSimilarity,
+  DependencyGraph,
+  MessageImpact,
+  ToolCallNode,
+  TokenBreakdown,
+  TopicCluster
+} from './analyzer-types.js';
 
 export class ContextAnalyzer {
-  private readonly MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-    'gpt-4': 8192,
-    'gpt-4-turbo': 128000,
-    'gpt-4-32k': 32768,
-    'gpt-3.5-turbo': 16385,
-    'gpt-3.5-turbo-16k': 16385,
-    'claude-3-opus': 200000,
-    'claude-3-sonnet': 200000,
-    'claude-3-haiku': 200000,
-    'claude-2': 100000,
-    'qwen': 32768,
-    'qwen2': 128000,
-    'default': 8192
-  };
-
-  private readonly STOP_WORDS = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare', 'ought', 'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but', 'if', 'or', 'because', 'until', 'while', 'although', 'though', 'after', 'before', 'when', 'whenever', 'where', 'wherever', 'whether', 'which', 'while', 'who', 'whoever', 'whom', 'whose', 'what', 'whatever', 'that', 'this', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs', 'myself', 'yourself', 'himself', 'herself', 'itself', 'ourselves', 'themselves']);
-
   analyzeRequest(request: RequestData, relatedRequests: RequestData[]): AnalysisResult {
     const tokenBreakdown = this.analyzeTokenDistribution(request);
     const messageImpacts = this.analyzeMessageImpacts(request);
@@ -136,7 +35,6 @@ export class ContextAnalyzer {
     const dependencyGraph = this.analyzeToolDependencies(relatedRequests);
     const insights = this.generateInsights(tokenBreakdown, messageImpacts, contextEvolution);
     
-    // Context Analysis
     const topicClusters = this.analyzeTopicClusters(request);
     const contextSimilarities = this.analyzeContextSimilarities(request);
     const compressionSuggestions = this.generateCompressionSuggestions(request, messageImpacts);
@@ -173,7 +71,6 @@ export class ContextAnalyzer {
       cacheWrite: 0
     };
 
-    // Estimate token counts based on content length
     if (request.systemPrompt) {
       breakdown.systemPrompt = this.estimateTokens(request.systemPrompt);
     }
@@ -187,7 +84,6 @@ export class ContextAnalyzer {
       breakdown.currentPrompt = this.estimateTokens(request.prompt);
     }
 
-    // Analyze tool responses in history
     if (request.historyMessages) {
       for (const msg of request.historyMessages) {
         const msgAny = msg as any;
@@ -222,10 +118,6 @@ export class ContextAnalyzer {
       const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
       const tokenCount = this.estimateTokens(content);
       
-      // Calculate impact score based on:
-      // - Recency (exponential decay)
-      // - Content length (longer = potentially more important)
-      // - Position (later messages often more relevant)
       const timeDecay = Math.exp(-(now - (msg.timestamp || now)) / halfLife);
       const lengthFactor = Math.log10(tokenCount + 10);
       const positionFactor = (index + 1) / request.historyMessages!.length;
@@ -244,7 +136,6 @@ export class ContextAnalyzer {
       });
     });
 
-    // Sort by impact score descending
     impacts.sort((a, b) => b.impactScore - a.impactScore);
 
     return impacts;
@@ -278,7 +169,6 @@ export class ContextAnalyzer {
         windowUtilization: compressionRatio
       });
 
-      // If compression ratio exceeded, simulate context compression
       if (compressionRatio > 1) {
         cumulativeTokens = Math.round(modelWindow * 0.7); // Compress to 70% after summary
       }
@@ -292,7 +182,6 @@ export class ContextAnalyzer {
     const edges: Array<{ from: string; to: string; weight: number }> = [];
 
     requests.forEach((request, index) => {
-      // Extract tool calls from history messages
       if (request.historyMessages) {
         request.historyMessages.forEach((msg: any) => {
           if (msg.tool_call_id || msg.type === 'tool_call') {
@@ -312,9 +201,7 @@ export class ContextAnalyzer {
             }
           }
 
-          // Track tool call relationships
           if (msg.tool_call_id && msg.role === 'tool') {
-            // This is a tool response, link to the original call
             const responseId = `response-${msg.tool_call_id}`;
             nodes.set(responseId, {
               id: responseId,
@@ -335,7 +222,6 @@ export class ContextAnalyzer {
         });
       }
 
-      // Track sequential tool calls as dependencies
       if (request.metadata && (request.metadata as any).toolCalls) {
         const toolCalls = (request.metadata as any).toolCalls as any[];
         toolCalls.forEach((call: any, idx: number) => {
@@ -353,7 +239,6 @@ export class ContextAnalyzer {
             });
           }
 
-          // Add edge from previous tool call
           if (idx > 0) {
             const prevId = toolCalls[idx - 1].id || `call-${index}-${idx - 1}`;
             edges.push({
@@ -366,7 +251,6 @@ export class ContextAnalyzer {
       }
     });
 
-    // Build children arrays from dependencies
     edges.forEach(edge => {
       const fromNode = nodes.get(edge.from);
       if (fromNode) {
@@ -387,7 +271,6 @@ export class ContextAnalyzer {
   ): AnalysisInsight[] {
     const insights: AnalysisInsight[] = [];
 
-    // Check for high token usage in system prompt
     if (tokenBreakdown.systemPrompt > tokenBreakdown.totalInput * 0.3) {
       insights.push({
         type: 'optimization',
@@ -397,7 +280,6 @@ export class ContextAnalyzer {
       });
     }
 
-    // Check for context window pressure
     const latestEvolution = contextEvolution[contextEvolution.length - 1];
     if (latestEvolution && latestEvolution.windowUtilization > 0.8) {
       insights.push({
@@ -408,7 +290,6 @@ export class ContextAnalyzer {
       });
     }
 
-    // Check for low-impact messages consuming tokens
     const lowImpactHighToken = messageImpacts.filter(
       m => m.impactScore < 30 && m.tokenCount > 100
     );
@@ -421,7 +302,6 @@ export class ContextAnalyzer {
       });
     }
 
-    // Check for cache efficiency
     if (tokenBreakdown.cacheRead > 0 && tokenBreakdown.cacheWrite > 0) {
       const cacheHitRate = tokenBreakdown.cacheRead / (tokenBreakdown.cacheRead + tokenBreakdown.cacheWrite);
       if (cacheHitRate < 0.5) {
@@ -438,8 +318,6 @@ export class ContextAnalyzer {
   }
 
   private estimateTokens(text: string): number {
-    // Simple estimation: ~4 characters per token for English
-    // For Chinese, ~1.5 characters per token
     const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
     const otherChars = text.length - chineseChars;
     
@@ -448,30 +326,26 @@ export class ContextAnalyzer {
 
   private getModelContextWindow(model: string): number {
     const modelLower = model.toLowerCase();
-    for (const [key, value] of Object.entries(this.MODEL_CONTEXT_WINDOWS)) {
+    for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
       if (modelLower.includes(key)) {
         return value;
       }
     }
-    return this.MODEL_CONTEXT_WINDOWS['default'];
+    return MODEL_CONTEXT_WINDOWS['default'];
   }
 
-  /**
-   * Analyze topic clusters in the conversation
-   */
   private analyzeTopicClusters(request: RequestData): TopicCluster[] {
     const clusters: TopicCluster[] = [];
     const messages = request.historyMessages || [];
     
     if (messages.length === 0) return clusters;
 
-    // Extract keywords from each message
     const messageKeywords = messages.map((msg: any) => {
       const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
       const words = content.toLowerCase()
         .replace(/[^\w\s]/g, ' ')
         .split(/\s+/)
-        .filter((w: string) => w.length > 3 && !this.STOP_WORDS.has(w));
+        .filter((w: string) => w.length > 3 && !STOP_WORDS.has(w));
       
       const wordFreq: Record<string, number> = {};
       words.forEach((w: string) => wordFreq[w] = (wordFreq[w] || 0) + 1);
@@ -486,7 +360,6 @@ export class ContextAnalyzer {
       };
     });
 
-    // Group by common keywords (simple clustering)
     const allKeywords = new Set<string>();
     messageKeywords.forEach(mk => mk.keywords.forEach(k => allKeywords.add(k)));
 
@@ -497,7 +370,6 @@ export class ContextAnalyzer {
         .map(mk => mk.messageId);
     });
 
-    // Create clusters from top keywords
     const topKeywords = Array.from(allKeywords).slice(0, 5);
     const totalMessages = messages.length;
 
@@ -516,16 +388,12 @@ export class ContextAnalyzer {
     return clusters;
   }
 
-  /**
-   * Analyze similarity between messages
-   */
   private analyzeContextSimilarities(request: RequestData): ContextSimilarity[] {
     const similarities: ContextSimilarity[] = [];
     const messages = request.historyMessages || [];
 
     if (messages.length < 2) return similarities;
 
-    // Simple Jaccard similarity based on word overlap
     for (let i = 0; i < messages.length; i++) {
       for (let j = i + 1; j < messages.length; j++) {
         const msg1 = messages[i] as any;
@@ -542,7 +410,7 @@ export class ContextAnalyzer {
         
         const similarity = union.size > 0 ? intersection.size / union.size : 0;
         
-        if (similarity > 0.3) { // Only report significant similarities
+        if (similarity > 0.3) {
           const commonWords = Array.from(intersection).slice(0, 3).join(', ');
           similarities.push({
             messageId: msg1.id || `msg-${i}`,
@@ -557,9 +425,6 @@ export class ContextAnalyzer {
     return similarities.sort((a, b) => b.similarityScore - a.similarityScore).slice(0, 10);
   }
 
-  /**
-   * Generate context compression suggestions
-   */
   private generateCompressionSuggestions(request: RequestData, messageImpacts: MessageImpact[]): ContextCompressionSuggestion[] {
     const suggestions: ContextCompressionSuggestion[] = [];
     const messages = request.historyMessages || [];
@@ -569,7 +434,6 @@ export class ContextAnalyzer {
       const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
       const tokenCount = this.estimateTokens(content);
       
-      // Low impact, high token messages are candidates for removal
       if (impact && impact.impactScore < 30 && tokenCount > 200) {
         suggestions.push({
           type: 'remove',
@@ -580,7 +444,6 @@ export class ContextAnalyzer {
         });
       }
       
-      // Old messages with medium impact could be summarized
       const msgTime = msg.timestamp || request.timestamp;
       const age = request.timestamp - msgTime;
       if (age > 30 * 60 * 1000 && impact && impact.impactScore >= 30 && impact.impactScore < 60) {
@@ -594,7 +457,6 @@ export class ContextAnalyzer {
       }
     });
 
-    // High impact messages should be kept
     messageImpacts.filter(m => m.impactScore >= 80).forEach(m => {
       suggestions.push({
         type: 'keep',
@@ -608,25 +470,18 @@ export class ContextAnalyzer {
     return suggestions.sort((a, b) => b.tokenSavings - a.tokenSavings);
   }
 
-  /**
-   * Analyze attention distribution
-   */
   private analyzeAttentionDistribution(request: RequestData): AttentionDistribution {
     const breakdown = this.analyzeTokenDistribution(request);
     const total = breakdown.totalInput || 1;
     
-    // Estimate attention based on token distribution and recency
     return {
       systemPrompt: Math.round((breakdown.systemPrompt / total) * 100) / 100,
-      recentMessages: 0.4, // Recent messages typically get more attention
-      olderMessages: 0.2, // Older messages get less attention
+      recentMessages: 0.4,
+      olderMessages: 0.2,
       toolResponses: Math.round((breakdown.toolResponses / total) * 100) / 100
     };
   }
 
-  /**
-   * Extract key messages
-   */
   private extractKeyMessages(messageImpacts: MessageImpact[]): MessageImpact[] {
     return messageImpacts
       .filter(m => m.impactScore >= 70)
@@ -634,9 +489,6 @@ export class ContextAnalyzer {
       .slice(0, 5);
   }
 
-  /**
-   * Calculate overall context health score
-   */
   private calculateContextHealth(request: RequestData, messageImpacts: MessageImpact[], tokenBreakdown: TokenBreakdown): {
     score: number;
     issues: string[];
@@ -646,7 +498,6 @@ export class ContextAnalyzer {
     const recommendations: string[] = [];
     let score = 100;
 
-    // Check for topic drift
     const topicClusters = this.analyzeTopicClusters(request);
     if (topicClusters.length > 5) {
       issues.push('Conversation covers too many topics');
@@ -654,7 +505,6 @@ export class ContextAnalyzer {
       score -= 10;
     }
 
-    // Check for redundant messages
     const similarities = this.analyzeContextSimilarities(request);
     const highSimilarity = similarities.filter(s => s.similarityScore > 0.7);
     if (highSimilarity.length > 3) {
@@ -663,7 +513,6 @@ export class ContextAnalyzer {
       score -= 15;
     }
 
-    // Check system prompt ratio
     const totalTokens = tokenBreakdown.totalInput || 1;
     const systemPromptRatio = tokenBreakdown.systemPrompt / totalTokens;
     if (systemPromptRatio > 0.3) {
@@ -672,7 +521,6 @@ export class ContextAnalyzer {
       score -= 20;
     }
 
-    // Check for low-impact messages
     const lowImpact = messageImpacts.filter(m => m.impactScore < 30).length;
     if (lowImpact > messageImpacts.length * 0.3) {
       issues.push('Many low-impact messages in context');
@@ -680,7 +528,6 @@ export class ContextAnalyzer {
       score -= 15;
     }
 
-    // Check context window utilization
     const modelWindow = this.getModelContextWindow(request.model);
     const utilization = totalTokens / modelWindow;
     if (utilization > 0.9) {

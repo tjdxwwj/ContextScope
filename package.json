@@ -1,6 +1,6 @@
 {
-  "name": "contextscope",
-  "version": "1.0.0",
+  "name": "openclaw-contextscope",
+  "version": "0.0.1",
   "description": "ContextScope - visualize API requests, prompts, and token usage",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,6 @@
   },
   "files": [
     "dist",
-    "frontend/dist",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
@@ -25,9 +24,10 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:all": "npm run build:frontend && npm run build:backend",
+    "build:all": "npm run build:frontend && npm run build:backend && npm run copy:frontend",
     "build:backend": "tsc",
     "build:frontend": "cd frontend && npm run build",
+    "copy:frontend": "node -e \"const fs=require('fs'), path=require('path'); const src='frontend/dist', dest='dist/frontend'; if(fs.existsSync(dest)) fs.rmSync(dest,{recursive:true}); fs.cpSync(src,dest,{recursive:true}); console.log('Copied frontend/dist to dist/frontend');\" ",
     "dev": "tsc --watch",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:frontend\"",

@@ -22,6 +22,33 @@ import { createAnalyzerHttpHandler } from './src/web/handler.js';
 import { configSchema } from './src/config.js';
 import { TokenEstimationService } from './src/token-estimator.js';
 import { TaskTracker } from './src/task-tracker.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
+
+// 打开浏览器函数
+async function openBrowser(url: string): Promise<void> {
+  const platform = process.platform;
+  let command: string;
+  
+  switch (platform) {
+    case 'darwin':
+      command = `open "${url}"`;
+      break;
+    case 'win32':
+      command = `start "" "${url}"`;
+      break;
+    default:
+      command = `xdg-open "${url}"`;
+  }
+  
+  try {
+    await execAsync(command);
+  } catch (error) {
+    // 静默失败，不影响主流程
+  }
+}
 
 interface PluginConfig {
   storage?: {
@@ -49,7 +76,7 @@ interface PluginConfig {
 }
 
 const plugin = {
-  id: 'contextscope',
+  id: 'openclaw-contextscope',
   name: 'ContextScope',
   description: 'Visualize and analyze API requests, prompts, completions, and token usage in real-time with advanced context analysis',
   configSchema,
@@ -406,7 +433,7 @@ const plugin = {
 
     // Register service for cleanup
     api.registerService({
-      id: 'contextscope',
+      id: 'openclaw-contextscope',
       start: async () => {
         await storage.initialize();
         api.logger.info('ContextScope plugin started');
@@ -415,6 +442,28 @@ const plugin = {
         await storage.close();
         api.logger.info('ContextScope plugin stopped');
       }
+    });
+
+    // Gateway start hook - print prominent log and open browser
+    api.on('gateway_start', async (event) => {
+      const dashboardUrl = `http://localhost:${event.port}/plugins/contextscope`;
+      
+      // 打印明显的日志
+      api.logger.info('');
+      api.logger.info('╔════════════════════════════════════════════════════════════╗');
+      api.logger.info('║  🔍 ContextScope Dashboard is ready!                       ║');
+      api.logger.info('║                                                            ║');
+      api.logger.info(`║  📊 Dashboard URL: ${dashboardUrl.padEnd(44)}║`);
+      api.logger.info('║                                                            ║');
+      api.logger.info('║  Open this URL in your browser to view:                    ║');
+      api.logger.info('║  • Real-time request visualization                         ║');
+      api.logger.info('║  • Token usage analytics                                   ║');
+      api.logger.info('║  • Context heatmaps                                        ║');
+      api.logger.info('╚════════════════════════════════════════════════════════════╝');
+      api.logger.info('');
+      
+      // 自动打开浏览器
+      await openBrowser(dashboardUrl);
     });
 
     // Register CLI command
@@ -446,7 +495,15 @@ const plugin = {
             text: `🔍 ContextScope Commands:\n` +
                   `• /analyzer - Show status\n` +
                   `• /analyzer stats - Detailed statistics\n` +
+                  `• /analyzer open - Open dashboard in browser\n` +
                   `• Dashboard: ${dashboardUrl}`
+          };
+        }
+        
+        if (args === 'open') {
+          await openBrowser(dashboardUrl);
+          return {
+            text: `🔍 Opening ContextScope Dashboard...\n${dashboardUrl}`
           };
         }
         
@@ -456,6 +513,7 @@ const plugin = {
                 `• Advanced context analysis enabled\n` +
                 `• Dashboard: ${dashboardUrl}\n` +
                 `• Use "/analyzer stats" for detailed statistics\n` +
+                `• Use "/analyzer open" to open dashboard\n` +
                 `• Use "/analyzer help" for commands`
         };
       }

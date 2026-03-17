@@ -20,7 +20,34 @@ import { createTaskHttpHandler } from './task-handler.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 鐢熶骇妯″紡锛氭鏌?frontend 鏋勫缓浜х墿鏄惁瀛樺湪
-const FRONTEND_DIST_PATH = join(__dirname, '..', '..', 'frontend', 'dist');
+// 生产模式：检查 frontend 构建产物是否存在
+// 支持两种路径：
+// 1. 开发时：从 src/web/ 出发，frontend 在 ../../frontend
+// 2. 生产时（npm包）：从 dist/src/web/ 出发，需要回退到项目根目录找 frontend
+function findFrontendDistPath(): string {
+  // 尝试路径1：npm包模式 - frontend 在 dist/frontend（与 backend 同级）
+  const npmPath = join(__dirname, '..', '..', 'frontend');
+  if (existsSync(join(npmPath, 'index.html'))) {
+    return npmPath;
+  }
+  
+  // 尝试路径2：开发模式 - 相对于 src/web/
+  const devPath = join(__dirname, '..', '..', 'frontend', 'dist');
+  if (existsSync(join(devPath, 'index.html'))) {
+    return devPath;
+  }
+  
+  // 尝试路径3：从 dist/src/web/ 回退到项目根目录
+  const prodPath = join(__dirname, '..', '..', '..', 'frontend', 'dist');
+  if (existsSync(join(prodPath, 'index.html'))) {
+    return prodPath;
+  }
+  
+  // 默认返回路径1（可能不存在，但会在后续检查中处理）
+  return npmPath;
+}
+
+const FRONTEND_DIST_PATH = findFrontendDistPath();
 const FRONTEND_INDEX_PATH = join(FRONTEND_DIST_PATH, 'index.html');
 const isProduction = existsSync(FRONTEND_INDEX_PATH);
 
