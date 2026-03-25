@@ -5,8 +5,8 @@
  * Strategy: Query storage for task state instead of relying on memory.
  */
 
-import type { RequestAnalyzerStorage } from './storage.js';
-import type { TaskMeta, TaskStatus } from './types.js';
+import type { RequestAnalyzerStorage } from '../storage.js';
+import type { TaskMeta, TaskStatus } from '../models/shared-types.js';
 
 export interface TaskTrackerOptions {
   taskTimeoutMs?: number;        // Default: 10 minutes

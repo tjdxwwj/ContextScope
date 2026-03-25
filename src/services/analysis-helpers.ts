@@ -1,15 +1,15 @@
-import { getModelContextWindow } from './types.js';
-import type { ChainItem, ChainResponse, ChainStats } from './types-chain.js';
-import type { ContextAnalyzer } from './analyzer.js';
-import type { PluginLogger } from './types.js';
-import type { RequestAnalyzerStorage } from './storage.js';
+import { getModelContextWindow } from '../models/shared-types.js';
+import type { ChainItem, ChainResponse, ChainStats } from '../models/chain-types.js';
+import type { ContextAnalyzer } from './analyzer.service.js';
+import type { PluginLogger } from '../models/shared-types.js';
+import type { RequestAnalyzerStorage } from '../storage.js';
 import type {
   DependencyGraphData,
   DetailedAnalysis,
   HeatmapData,
   TimelineData,
   TokenVisualization
-} from './service-types.js';
+} from '../models/service-types.js';
 
 export interface TimelineMessageSnapshot {
   id: string;

@@ -98,31 +98,6 @@ export interface TaskTreeNode {
   };
 }
 
-export interface PluginConfig {
-  storage?: {
-    maxRequests?: number;
-    retentionDays?: number;
-    compression?: boolean;
-  };
-  visualization?: {
-    theme?: 'light' | 'dark' | 'auto';
-    autoRefresh?: boolean;
-    refreshInterval?: number;
-    charts?: string[];
-  };
-  capture?: {
-    includeSystemPrompts?: boolean;
-    includeMessageHistory?: boolean;
-    anonymizeContent?: boolean;
-    maxPromptLength?: number;
-  };
-  alerts?: {
-    enabled?: boolean;
-    tokenThreshold?: number;
-    costThreshold?: number;
-  };
-}
-
 /**
  * Model pricing data (per 1K tokens)
  * Centralized pricing configuration

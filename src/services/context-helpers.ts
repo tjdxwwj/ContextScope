@@ -1,8 +1,8 @@
-import { estimateCost, getModelContextWindow } from './types.js';
-import type { TokenEstimationService } from './token-estimator.js';
-import type { PluginLogger } from './types.js';
-import type { RequestAnalyzerStorage } from './storage.js';
-import type { ContextDistributionResponse, TokenDistribution } from './service-types.js';
+import { estimateCost, getModelContextWindow } from '../models/shared-types.js';
+import type { TokenEstimationService } from './token-estimator.service.js';
+import type { PluginLogger } from '../models/shared-types.js';
+import type { RequestAnalyzerStorage } from '../storage.js';
+import type { ContextDistributionResponse, TokenDistribution } from '../models/service-types.js';
 
 interface ServiceContextHelperContext {
   storage: RequestAnalyzerStorage;

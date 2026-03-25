@@ -1,5 +1,5 @@
 /**
- * ContextScope Service
+ * ContextScope Request Service
  * 
  * Core service that handles request analysis, statistics, and alerts
  */
@@ -11,13 +11,13 @@ import type {
   RequestQueryFilters,
   SubagentLinkData,
   ToolCallData,
-} from './storage.js';
-import type { PluginConfig } from './config.js';
-import { ContextAnalyzer, type AnalysisResult } from './analyzer.js';
-import { TokenEstimationService } from './token-estimator.js';
-import type { ChainResponse } from './types-chain.js';
-import type { PluginLogger, TaskData, TaskTreeNode } from './types.js';
-import { estimateCost } from './types.js';
+} from '../storage.js';
+import type { PluginConfig } from '../config.js';
+import { ContextAnalyzer, type AnalysisResult } from './analyzer.service.js';
+import { TokenEstimationService } from './token-estimator.service.js';
+import type { ChainResponse } from '../models/chain-types.js';
+import type { PluginLogger, TaskData, TaskTreeNode } from '../models/shared-types.js';
+import { estimateCost } from '../models/shared-types.js';
 import type {
   AlertContext,
   AnalysisStats,
@@ -25,7 +25,7 @@ import type {
   DetailedAnalysis,
   ModelCostInfo,
   OpenRouterModelsResponse,
-} from './service-types.js';
+} from '../models/service-types.js';
 import {
   compareTimelinePoints as compareTimelinePointsHelper,
   getChain as getChainHelper,
@@ -34,8 +34,8 @@ import {
   getTimelineDetail as getTimelineDetailHelper,
   type TimelineDetailResponse,
   type TimelinePointsComparisonResponse
-} from './service-analysis-helpers.js';
-import { getContextDistribution as getContextDistributionHelper } from './service-context-helpers.js';
+} from './analysis-helpers.js';
+import { getContextDistribution as getContextDistributionHelper } from './context-helpers.js';
 export type {
   AlertContext,
   AnalysisStats,
@@ -49,7 +49,7 @@ export type {
   TimelineData,
   TokenDistribution,
   TokenVisualization
-} from './service-types.js';
+} from '../models/service-types.js';
 
 export class RequestAnalyzerService {
   private storage: RequestAnalyzerStorage;
@@ -379,6 +379,7 @@ export class RequestAnalyzerService {
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength) + '...[TRUNCATED]';
   }
+
   async getTimelineDetail(runId: string, timestamp: number): Promise<TimelineDetailResponse | null> {
     return await getTimelineDetailHelper({
       storage: this.storage,
@@ -420,6 +421,8 @@ export class RequestAnalyzerService {
     ttl: number; // 缓存有效期（毫秒）
   } | null = null;
 
+  private fetchPricingPromise: Promise<ModelCostInfo[]> | null = null;
+
   async getOpenRouterPricing(forceRefresh = false): Promise<ModelCostInfo[]> {
     const now = Date.now();
     
@@ -429,8 +432,14 @@ export class RequestAnalyzerService {
       return this.pricingCache.data;
     }
     
-    try {
-      this.logger.info?.(`Fetching pricing from OpenRouter API (forceRefresh=${forceRefresh})...`);
+    // 防止并发重复请求
+    if (this.fetchPricingPromise) {
+      return this.fetchPricingPromise;
+    }
+    
+    this.fetchPricingPromise = (async () => {
+      try {
+        this.logger.info?.(`Fetching pricing from OpenRouter API (forceRefresh=${forceRefresh})...`);
       
       const response = await fetch('https://openrouter.ai/api/v1/models', {
         method: 'GET',
@@ -490,7 +499,12 @@ export class RequestAnalyzerService {
         return this.pricingCache.data;
       }
       return [];
+    } finally {
+      this.fetchPricingPromise = null;
     }
+    })();
+    
+    return this.fetchPricingPromise;
   }
 
   /**
@@ -500,40 +514,26 @@ export class RequestAnalyzerService {
     const totalTokens = usage.total || (usage.input || 0) + (usage.output || 0);
     if (totalTokens === 0) return 0;
 
-    // 这里可以缓存价格数据，避免每次都调用 API
-    // 简化版本：使用硬编码的常见模型价格
-    const modelPricing: Record<string, { input: number; output: number }> = {
-      // OpenAI
-      'openai/gpt-4': { input: 0.03, output: 0.06 },
-      'openai/gpt-4-turbo': { input: 0.01, output: 0.03 },
-      'openai/gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
-      'openai/gpt-4o': { input: 0.005, output: 0.015 },
-      'openai/gpt-4o-mini': { input: 0.00015, output: 0.0006 },
-      
-      // Anthropic
-      'anthropic/claude-3-opus': { input: 0.015, output: 0.075 },
-      'anthropic/claude-3-sonnet': { input: 0.003, output: 0.015 },
-      'anthropic/claude-3-haiku': { input: 0.00025, output: 0.00125 },
-      'anthropic/claude-3-5-sonnet': { input: 0.003, output: 0.015 },
-      
-      // Google
-      'google/gemini-pro': { input: 0.00025, output: 0.0005 },
-      'google/gemini-2.0-flash': { input: 0.0001, output: 0.0004 },
-      
-      // Meta
-      'meta-llama/llama-3-70b-instruct': { input: 0.0008, output: 0.0008 },
-      'meta-llama/llama-3-8b-instruct': { input: 0.00005, output: 0.00005 },
-      
-      // Qwen (Alibaba)
-      'qwen/qwen-2.5-72b-instruct': { input: 0.0004, output: 0.0008 },
-      'qwen/qwen-plus': { input: 0.0004, output: 0.0012 },
-      
-      // DeepSeek
-      'deepseek/deepseek-chat': { input: 0.00027, output: 0.0011 },
-      'deepseek/deepseek-coder': { input: 0.00027, output: 0.0011 },
-    };
+    let pricing = { input: 0.001, output: 0.002 }; // 默认价格
 
-    const pricing = modelPricing[modelId] || { input: 0.001, output: 0.002 }; // 默认价格
+    // 尝试从内存缓存中获取价格
+    if (this.pricingCache?.data) {
+      // 这里的 modelId 可能包含 provider 前缀，例如 'openai/gpt-4o'
+      const cachedModel = this.pricingCache.data.find(
+        m => m.modelId === modelId || m.modelId.endsWith(`/${modelId}`) || m.modelName === modelId
+      );
+      if (cachedModel) {
+        pricing = {
+          input: cachedModel.promptPricePer1M,
+          output: cachedModel.completionPricePer1M
+        };
+      }
+    } else {
+      // 异步触发获取价格数据，以优化下一次计算，避免阻塞当前流程
+      this.getOpenRouterPricing().catch(err => {
+        this.logger.error(`Failed to background fetch pricing: ${err}`);
+      });
+    }
     
     const inputCost = (usage.input || 0) / 1_000_000 * pricing.input;
     const outputCost = (usage.output || 0) / 1_000_000 * pricing.output;

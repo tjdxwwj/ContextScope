@@ -1,5 +1,5 @@
-import type { RequestData } from './storage.js';
-import { MODEL_CONTEXT_WINDOWS, STOP_WORDS } from './analyzer-constants.js';
+import type { RequestData } from '../storage.js';
+import { MODEL_CONTEXT_WINDOWS, STOP_WORDS } from '../models/constants.js';
 import type {
   AnalysisInsight,
   AnalysisResult,
@@ -12,7 +12,7 @@ import type {
   ToolCallNode,
   TokenBreakdown,
   TopicCluster
-} from './analyzer-types.js';
+} from '../models/analysis-types.js';
 export type {
   AnalysisInsight,
   AnalysisResult,
@@ -25,7 +25,7 @@ export type {
   ToolCallNode,
   TokenBreakdown,
   TopicCluster
-} from './analyzer-types.js';
+} from '../models/analysis-types.js';
 
 export class ContextAnalyzer {
   analyzeRequest(request: RequestData, relatedRequests: RequestData[]): AnalysisResult {

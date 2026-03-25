@@ -5,7 +5,7 @@
 
 import type { RawStore, RequestData, SubagentLinkData, ToolCallData } from './rawTypes'
 
-const API_BASE = '/plugins/contextscope/api'
+const API_BASE = import.meta.env.BASE_URL.replace(/\/+$/, '') + '/api'
 const API_REQUEST_TIMEOUT_MS = 25000
 const API_AUX_TIMEOUT_MS = 6000
 const REQUEST_LIST_LIMIT = 200
@@ -411,7 +411,9 @@ export async function fetchChain(
           attemptController.abort()
         }, attemptTimeoutMs)
         try {
-          const res = await fetch(`${API_BASE}/chain/${encodeURIComponent(runId)}`, {
+          // 使用 query 参数代替路径参数，兼容 OpenClaw 的 prefix 匹配模式
+          const url = `${API_BASE}/chain?runId=${encodeURIComponent(runId)}`
+          const res = await fetch(url, {
             signal: attemptController.signal,
           })
           if (!res.ok) {

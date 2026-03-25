@@ -17,11 +17,11 @@
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
 import { RequestAnalyzerStorage } from './src/storage.js';
-import { RequestAnalyzerService } from './src/service.js';
-import { createAnalyzerHttpHandler } from './src/web/handler.js';
+import { RequestAnalyzerService } from './src/services/request.service.js';
+import { createAnalyzerRouter } from './src/web/router.js';
 import { configSchema } from './src/config.js';
-import { TokenEstimationService } from './src/token-estimator.js';
-import { TaskTracker } from './src/task-tracker.js';
+import { TokenEstimationService } from './src/services/token-estimator.service.js';
+import { TaskTracker } from './src/services/task-tracker.service.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -76,8 +76,8 @@ interface PluginConfig {
 }
 
 const plugin = {
-  id: 'openclaw-contextscope',
-  name: 'ContextScope',
+  id: 'openclaw-contextscope-dev',
+  name: 'ContextScope (Dev)',
   description: 'Visualize and analyze API requests, prompts, completions, and token usage in real-time with advanced context analysis',
   configSchema,
   
@@ -109,10 +109,10 @@ const plugin = {
 
     // Register HTTP route for dashboard
     api.registerHttpRoute({
-      path: '/plugins/contextscope',
+      path: '/plugins/contextscope-dev',
       auth: 'plugin',
       match: 'prefix',
-      handler: createAnalyzerHttpHandler({ service, config, logger: api.logger })
+      handler: createAnalyzerRouter({ service, config, logger: api.logger })
     });
 
     // Register hooks for capturing requests

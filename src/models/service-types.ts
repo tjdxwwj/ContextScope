@@ -1,5 +1,5 @@
-import type { AnalysisInsight } from './analyzer.js';
-import type { SubagentLinkData, ToolCallData } from './storage.js';
+import type { AnalysisInsight } from './analysis-types.js';
+import type { SubagentLinkData, ToolCallData } from '../storage.js';
 
 export interface AnalysisStats {
   totalRequests: number;

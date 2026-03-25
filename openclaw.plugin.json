@@ -1,6 +1,6 @@
 {
-  "id": "openclaw-contextscope",
-  "name": "ContextScope",
+  "id": "openclaw-contextscope-dev",
+  "name": "ContextScope (Dev)",
   "description": "Visualize and analyze API requests, prompts, completions, and token usage in real-time",
   "uiHints": {
     "storage.maxRequests": {

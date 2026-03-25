@@ -35,9 +35,10 @@ export function PricingTable() {
   const fetchPricing = async (forceRefresh = false) => {
     console.log('====== [PricingTable] Fetch start ======')
     try {
+      const baseUrl = import.meta.env.BASE_URL.replace(/\/+$/, '')
       const url = forceRefresh 
-        ? '/plugins/contextscope/api/pricing?refresh=true'
-        : '/plugins/contextscope/api/pricing'
+        ? `${baseUrl}/api/pricing?refresh=true`
+        : `${baseUrl}/api/pricing`
       
       console.log('[PricingTable] 1. Fetching from', url)
       const res = await fetch(url)

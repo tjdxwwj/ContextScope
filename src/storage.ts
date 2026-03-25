@@ -6,7 +6,12 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import type { PluginLogger, TaskData, TaskMeta, TaskTokenStats, TaskTreeNode } from './types.js';
+import type { PluginLogger, TaskData, TaskMeta, TaskTokenStats, TaskTreeNode } from './models/shared-types.js';
+import { SCHEMA_SQL } from './dao/schema.sql.js';
+import { RequestDao } from './dao/request.dao.js';
+import { ToolCallDao } from './dao/tool-call.dao.js';
+import { SubagentLinkDao } from './dao/subagent-link.dao.js';
+import { TaskDao } from './dao/task.dao.js';
 
 export interface RequestData {
   id?: number;
@@ -128,6 +133,11 @@ export class RequestAnalyzerStorage {
   private sqliteEnabled = false;
   private options: StorageOptions;
   private initialized = false;
+  // DAO instances (set when SQLite is enabled)
+  private requestDao: RequestDao | null = null;
+  private toolCallDao: ToolCallDao | null = null;
+  private subagentLinkDao: SubagentLinkDao | null = null;
+  private taskDao: TaskDao | null = null;
   private nextId = 1;
   private nextLinkId = 1;
   private nextToolCallId = 1;
@@ -369,95 +379,14 @@ export class RequestAnalyzerStorage {
       this.options.logger.info?.(`Creating SQLite database at: ${dbFile}`);
       const db = new DatabaseSync(dbFile);
       this.options.logger.info?.('SQLite database created successfully');
-      db.exec(`
-        PRAGMA journal_mode=WAL;
-        PRAGMA synchronous=NORMAL;
-        CREATE TABLE IF NOT EXISTS requests (
-          id INTEGER PRIMARY KEY,
-          type TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          task_id TEXT,
-          session_id TEXT NOT NULL,
-          session_key TEXT,
-          provider TEXT,
-          model TEXT,
-          timestamp INTEGER NOT NULL,
-          prompt TEXT,
-          system_prompt TEXT,
-          history_messages TEXT,
-          assistant_texts TEXT,
-          usage_json TEXT,
-          images_count INTEGER,
-          metadata_json TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_requests_run_ts ON requests(run_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_requests_session_ts ON requests(session_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp DESC);
-        CREATE TABLE IF NOT EXISTS tool_calls (
-          id INTEGER PRIMARY KEY,
-          run_id TEXT NOT NULL,
-          session_id TEXT,
-          session_key TEXT,
-          tool_name TEXT NOT NULL,
-          tool_call_id TEXT,
-          timestamp INTEGER NOT NULL,
-          started_at INTEGER,
-          duration_ms INTEGER,
-          params_json TEXT,
-          result_json TEXT,
-          error TEXT,
-          metadata_json TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_tool_calls_run_ts ON tool_calls(run_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_tool_calls_session_ts ON tool_calls(session_id, timestamp DESC);
-        CREATE TABLE IF NOT EXISTS subagent_links (
-          id INTEGER PRIMARY KEY,
-          kind TEXT,
-          parent_run_id TEXT NOT NULL,
-          child_run_id TEXT,
-          parent_session_id TEXT,
-          parent_session_key TEXT,
-          child_session_key TEXT,
-          runtime TEXT,
-          mode TEXT,
-          label TEXT,
-          tool_call_id TEXT,
-          timestamp INTEGER NOT NULL,
-          ended_at INTEGER,
-          outcome TEXT,
-          error TEXT,
-          metadata_json TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_run_ts ON subagent_links(parent_run_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_subagent_links_child_run_ts ON subagent_links(child_run_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_subagent_links_parent_session_ts ON subagent_links(parent_session_id, timestamp DESC);
-        CREATE TABLE IF NOT EXISTS tasks (
-          task_id TEXT PRIMARY KEY,
-          session_id TEXT NOT NULL,
-          session_key TEXT,
-          parent_task_id TEXT,
-          parent_session_id TEXT,
-          start_time INTEGER NOT NULL,
-          end_time INTEGER,
-          duration INTEGER,
-          status TEXT,
-          end_reason TEXT,
-          error TEXT,
-          llm_calls INTEGER DEFAULT 0,
-          tool_calls INTEGER DEFAULT 0,
-          subagent_spawns INTEGER DEFAULT 0,
-          total_input INTEGER DEFAULT 0,
-          total_output INTEGER DEFAULT 0,
-          total_tokens INTEGER DEFAULT 0,
-          estimated_cost REAL DEFAULT 0,
-          run_ids_json TEXT,
-          child_task_ids_json TEXT,
-          metadata_json TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_tasks_session_ts ON tasks(session_id, start_time DESC);
-        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-      `);
+      // Apply schema via DAO layer (no inline SQL here)
+      db.exec(SCHEMA_SQL);
       this.sqliteDb = db;
+      // Wire up DAOs
+      this.requestDao = new RequestDao(db);
+      this.toolCallDao = new ToolCallDao(db);
+      this.subagentLinkDao = new SubagentLinkDao(db);
+      this.taskDao = new TaskDao(db);
       this.sqliteEnabled = true;
       this.options.logger.info('ContextScope storage SQLite enabled');
     } catch (error) {
@@ -467,212 +396,13 @@ export class RequestAnalyzerStorage {
     }
   }
 
+  // ── JSON helpers (kept for JSON-file fallback path) ─────────────────────
   private toJson(value: unknown): string | null {
     if (value == null) return null;
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return null;
-    }
+    try { return JSON.stringify(value); } catch { return null; }
   }
 
-  private parseJson<T>(value: unknown): T | undefined {
-    if (typeof value !== 'string' || value.length === 0) return undefined;
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private sqliteUpsertRequest(data: RequestData): void {
-    if (!this.sqliteEnabled || !this.sqliteDb) return;
-    this.sqliteDb
-      .prepare(`INSERT OR REPLACE INTO requests (
-        id, type, run_id, task_id, session_id, session_key, provider, model, timestamp,
-        prompt, system_prompt, history_messages, assistant_texts, usage_json, images_count, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        data.id ?? null,
-        data.type,
-        data.runId,
-        data.taskId ?? null,
-        data.sessionId,
-        data.sessionKey ?? null,
-        data.provider,
-        data.model,
-        data.timestamp,
-        data.prompt ?? null,
-        data.systemPrompt ?? null,
-        this.toJson(data.historyMessages),
-        this.toJson(data.assistantTexts),
-        this.toJson(data.usage),
-        data.imagesCount ?? null,
-        this.toJson(data.metadata)
-      );
-  }
-
-  private sqliteUpsertToolCall(data: ToolCallData): void {
-    if (!this.sqliteEnabled || !this.sqliteDb) return;
-    this.sqliteDb
-      .prepare(`INSERT OR REPLACE INTO tool_calls (
-        id, run_id, session_id, session_key, tool_name, tool_call_id, timestamp, started_at,
-        duration_ms, params_json, result_json, error, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        data.id ?? null,
-        data.runId,
-        data.sessionId ?? null,
-        data.sessionKey ?? null,
-        data.toolName,
-        data.toolCallId ?? null,
-        data.timestamp,
-        data.startedAt ?? null,
-        data.durationMs ?? null,
-        this.toJson(data.params),
-        this.toJson(data.result),
-        data.error ?? null,
-        this.toJson(data.metadata)
-      );
-  }
-
-  private sqliteUpsertTask(data: TaskData): void {
-    if (!this.sqliteEnabled || !this.sqliteDb) return;
-    this.sqliteDb
-      .prepare(`INSERT OR REPLACE INTO tasks (
-        task_id, session_id, session_key, parent_task_id, parent_session_id,
-        start_time, end_time, duration, status, end_reason, error,
-        llm_calls, tool_calls, subagent_spawns,
-        total_input, total_output, total_tokens, estimated_cost,
-        run_ids_json, child_task_ids_json, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        data.taskId,
-        data.sessionId,
-        data.sessionKey ?? null,
-        data.parentTaskId ?? null,
-        data.parentSessionId ?? null,
-        data.startTime,
-        data.endTime ?? null,
-        data.duration ?? null,
-        data.status ?? null,
-        data.endReason ?? null,
-        data.error ?? null,
-        data.stats?.llmCalls ?? 0,
-        data.stats?.toolCalls ?? 0,
-        data.stats?.subagentSpawns ?? 0,
-        data.stats?.totalInput ?? 0,
-        data.stats?.totalOutput ?? 0,
-        data.stats?.totalTokens ?? 0,
-        data.stats?.estimatedCost ?? 0,
-        this.toJson(data.runIds),
-        this.toJson(data.childTaskIds),
-        this.toJson(data.metadata)
-      );
-  }
-
-  private sqliteUpsertSubagentLink(data: SubagentLinkData): void {
-    if (!this.sqliteEnabled || !this.sqliteDb) return;
-    this.sqliteDb
-      .prepare(`INSERT OR REPLACE INTO subagent_links (
-        id, kind, parent_run_id, child_run_id, parent_session_id, parent_session_key, child_session_key,
-        runtime, mode, label, tool_call_id, timestamp, ended_at, outcome, error, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        data.id ?? null,
-        data.kind ?? null,
-        data.parentRunId,
-        data.childRunId ?? null,
-        data.parentSessionId ?? null,
-        data.parentSessionKey ?? null,
-        data.childSessionKey ?? null,
-        data.runtime ?? null,
-        data.mode ?? null,
-        data.label ?? null,
-        data.toolCallId ?? null,
-        data.timestamp,
-        data.endedAt ?? null,
-        data.outcome ?? null,
-        data.error ?? null,
-        this.toJson(data.metadata)
-      );
-  }
-
-  private fromSqliteRequestRow(row: any): RequestData {
-    return {
-      id: row.id,
-      type: row.type,
-      runId: row.run_id,
-      taskId: row.task_id ?? undefined,
-      sessionId: row.session_id,
-      sessionKey: row.session_key ?? undefined,
-      provider: row.provider,
-      model: row.model,
-      timestamp: row.timestamp,
-      prompt: row.prompt ?? undefined,
-      systemPrompt: row.system_prompt ?? undefined,
-      historyMessages: this.parseJson<unknown[]>(row.history_messages),
-      assistantTexts: this.parseJson<string[]>(row.assistant_texts),
-      usage: this.parseJson<RequestData['usage']>(row.usage_json),
-      imagesCount: row.images_count ?? undefined,
-      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
-    };
-  }
-
-  private fromSqliteRequestSummaryRow(row: any): RequestListItem {
-    return {
-      id: row.id,
-      type: row.type,
-      runId: row.run_id,
-      taskId: row.task_id ?? undefined,
-      sessionId: row.session_id,
-      sessionKey: row.session_key ?? undefined,
-      provider: row.provider,
-      model: row.model,
-      timestamp: row.timestamp,
-      usage: this.parseJson<RequestData['usage']>(row.usage_json),
-      imagesCount: row.images_count ?? undefined,
-    };
-  }
-
-  private fromSqliteToolCallRow(row: any): ToolCallData {
-    return {
-      id: row.id,
-      runId: row.run_id,
-      sessionId: row.session_id ?? undefined,
-      sessionKey: row.session_key ?? undefined,
-      toolName: row.tool_name,
-      toolCallId: row.tool_call_id ?? undefined,
-      timestamp: row.timestamp,
-      startedAt: row.started_at ?? undefined,
-      durationMs: row.duration_ms ?? undefined,
-      params: this.parseJson<Record<string, unknown>>(row.params_json),
-      result: this.parseJson<unknown>(row.result_json),
-      error: row.error ?? undefined,
-      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
-    };
-  }
-
-  private fromSqliteSubagentLinkRow(row: any): SubagentLinkData {
-    return {
-      id: row.id,
-      kind: row.kind ?? undefined,
-      parentRunId: row.parent_run_id,
-      childRunId: row.child_run_id ?? undefined,
-      parentSessionId: row.parent_session_id ?? undefined,
-      parentSessionKey: row.parent_session_key ?? undefined,
-      childSessionKey: row.child_session_key ?? undefined,
-      runtime: row.runtime ?? undefined,
-      mode: row.mode ?? undefined,
-      label: row.label ?? undefined,
-      toolCallId: row.tool_call_id ?? undefined,
-      timestamp: row.timestamp,
-      endedAt: row.ended_at ?? undefined,
-      outcome: row.outcome ?? undefined,
-      error: row.error ?? undefined,
-      metadata: this.parseJson<Record<string, unknown>>(row.metadata_json),
-    };
-  }
+  // row mappers removed — now live in the DAO layer
 
   async captureRequest(data: RequestData): Promise<void> {
     if (!this.initialized) await this.initialize();
@@ -682,8 +412,8 @@ export class RequestAnalyzerStorage {
         ...data,
         id: this.nextId++
       };
-      if (this.sqliteEnabled) {
-        this.sqliteUpsertRequest(requestWithId);
+      if (this.sqliteEnabled && this.requestDao) {
+        this.requestDao.upsert(requestWithId);
       } else {
         this.requests.unshift(requestWithId);
       }
@@ -704,11 +434,8 @@ export class RequestAnalyzerStorage {
    */
   async getInputForRun(runId: string): Promise<RequestData | undefined> {
     if (!this.initialized) await this.initialize();
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const row = this.sqliteDb
-        .prepare(`SELECT * FROM requests WHERE run_id = ? AND type = 'input' ORDER BY timestamp DESC, id DESC LIMIT 1`)
-        .get(runId);
-      return row ? this.fromSqliteRequestRow(row) : undefined;
+    if (this.sqliteEnabled && this.requestDao) {
+      return this.requestDao.findInputByRunId(runId);
     }
     return this.requests.find(r => r.runId === runId && r.type === 'input');
   }
@@ -736,8 +463,8 @@ export class RequestAnalyzerStorage {
       }
 
       // 如果 SQLite 已启用，立即写入数据库
-      if (this.sqliteEnabled && this.sqliteDb) {
-        this.sqliteUpsertTask(data);
+      if (this.sqliteEnabled && this.taskDao) {
+        this.taskDao.upsert(data);
       }
 
       this.cleanupOldRequests();
@@ -776,6 +503,7 @@ export class RequestAnalyzerStorage {
    */
   async getTask(taskId: string): Promise<TaskData | undefined> {
     if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.taskDao) return this.taskDao.findById(taskId);
     return this.tasks.find(t => t.taskId === taskId);
   }
 
@@ -784,6 +512,7 @@ export class RequestAnalyzerStorage {
    */
   async getTaskBySessionId(sessionId: string): Promise<TaskData | undefined> {
     if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.taskDao) return this.taskDao.findBySessionId(sessionId);
     return this.tasks.find(t => t.sessionId === sessionId);
   }
 
@@ -792,6 +521,7 @@ export class RequestAnalyzerStorage {
    */
   async getTaskBySessionKey(sessionKey: string): Promise<TaskData | undefined> {
     if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.taskDao) return this.taskDao.findBySessionKey(sessionKey);
     return this.tasks.find(t => t.sessionKey === sessionKey);
   }
 
@@ -800,14 +530,11 @@ export class RequestAnalyzerStorage {
    */
   async getRecentTasks(limit = 50, sessionId?: string): Promise<TaskData[]> {
     if (!this.initialized) await this.initialize();
-
+    if (this.sqliteEnabled && this.taskDao) return this.taskDao.findRecent(limit, sessionId);
     let tasks = sessionId
       ? this.tasks.filter(t => t.sessionId === sessionId)
-      : this.tasks.filter(t => !t.parentTaskId); // Only root tasks
-
-    return tasks
-      .sort((a, b) => b.startTime - a.startTime)
-      .slice(0, limit);
+      : this.tasks.filter(t => !t.parentTaskId);
+    return tasks.sort((a, b) => b.startTime - a.startTime).slice(0, limit);
   }
 
   /**
@@ -848,6 +575,7 @@ export class RequestAnalyzerStorage {
    */
   async getTasksBySessionId(sessionId: string, limit = 50): Promise<TaskData[]> {
     if (!this.initialized) await this.initialize();
+    if (this.sqliteEnabled && this.taskDao) return this.taskDao.findBySessionIdMany(sessionId, limit);
     return this.tasks
       .filter(t => t.sessionId === sessionId)
       .sort((a, b) => b.startTime - a.startTime)
@@ -911,8 +639,8 @@ export class RequestAnalyzerStorage {
         outcome: data.outcome ?? undefined,
         id: this.nextLinkId++
       };
-      if (this.sqliteEnabled) {
-        this.sqliteUpsertSubagentLink(recordWithId);
+      if (this.sqliteEnabled && this.subagentLinkDao) {
+        this.subagentLinkDao.upsert(recordWithId);
       } else {
         this.subagentLinks.unshift(recordWithId);
       }
@@ -935,21 +663,15 @@ export class RequestAnalyzerStorage {
       return;
     }
 
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const row = this.sqliteDb
-        .prepare(`SELECT * FROM subagent_links WHERE child_run_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1`)
-        .get(childRunId);
-      if (!row) return;
-      const current = this.fromSqliteSubagentLinkRow(row);
+    if (this.sqliteEnabled && this.subagentLinkDao) {
+      const current = this.subagentLinkDao.findByChildRunId(childRunId);
+      if (!current) return;
       const next: SubagentLinkData = {
         ...current,
         ...params.patch,
-        metadata: {
-          ...(current.metadata || {}),
-          ...(params.patch.metadata || {})
-        }
+        metadata: { ...(current.metadata || {}), ...(params.patch.metadata || {}) }
       };
-      this.sqliteUpsertSubagentLink(next);
+      this.subagentLinkDao.upsert(next);
     } else {
       const idx = this.subagentLinks.findIndex(r => r.childRunId === childRunId);
       if (idx < 0) {
@@ -977,8 +699,8 @@ export class RequestAnalyzerStorage {
         ...data,
         id: this.nextToolCallId++
       };
-      if (this.sqliteEnabled) {
-        this.sqliteUpsertToolCall(recordWithId);
+      if (this.sqliteEnabled && this.toolCallDao) {
+        this.toolCallDao.upsert(recordWithId);
       } else {
         this.toolCalls.unshift(recordWithId);
       }
@@ -992,43 +714,8 @@ export class RequestAnalyzerStorage {
 
   async getRequests(filters: RequestQueryFilters = {}): Promise<RequestData[]> {
     if (!this.initialized) await this.initialize();
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const clauses: string[] = [];
-      const params: unknown[] = [];
-      if (filters.sessionId) {
-        clauses.push('session_id = ?');
-        params.push(filters.sessionId);
-      }
-      if (filters.runId) {
-        clauses.push('run_id = ?');
-        params.push(filters.runId);
-      }
-      if (filters.taskId) {
-        clauses.push('task_id = ?');
-        params.push(filters.taskId);
-      }
-      if (filters.provider) {
-        clauses.push('provider = ?');
-        params.push(filters.provider);
-      }
-      if (filters.model) {
-        clauses.push('model = ?');
-        params.push(filters.model);
-      }
-      if (filters.startTime) {
-        clauses.push('timestamp >= ?');
-        params.push(filters.startTime);
-      }
-      if (filters.endTime) {
-        clauses.push('timestamp <= ?');
-        params.push(filters.endTime);
-      }
-      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const offset = filters.offset || 0;
-      const limit = filters.limit || 100;
-      const sql = `SELECT * FROM requests ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
-      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
-      return rows.map((row: any) => this.fromSqliteRequestRow(row));
+    if (this.sqliteEnabled && this.requestDao) {
+      return this.requestDao.findMany(filters);
     }
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
@@ -1052,43 +739,8 @@ export class RequestAnalyzerStorage {
 
   async getRequestSummaries(filters: RequestQueryFilters = {}): Promise<RequestListItem[]> {
     if (!this.initialized) await this.initialize();
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const clauses: string[] = [];
-      const params: unknown[] = [];
-      if (filters.sessionId) {
-        clauses.push('session_id = ?');
-        params.push(filters.sessionId);
-      }
-      if (filters.runId) {
-        clauses.push('run_id = ?');
-        params.push(filters.runId);
-      }
-      if (filters.taskId) {
-        clauses.push('task_id = ?');
-        params.push(filters.taskId);
-      }
-      if (filters.provider) {
-        clauses.push('provider = ?');
-        params.push(filters.provider);
-      }
-      if (filters.model) {
-        clauses.push('model = ?');
-        params.push(filters.model);
-      }
-      if (filters.startTime) {
-        clauses.push('timestamp >= ?');
-        params.push(filters.startTime);
-      }
-      if (filters.endTime) {
-        clauses.push('timestamp <= ?');
-        params.push(filters.endTime);
-      }
-      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const offset = filters.offset || 0;
-      const limit = filters.limit || 100;
-      const sql = `SELECT id, type, run_id, task_id, session_id, session_key, provider, model, timestamp, usage_json, images_count FROM requests ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
-      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
-      return rows.map((row: any) => this.fromSqliteRequestSummaryRow(row));
+    if (this.sqliteEnabled && this.requestDao) {
+      return this.requestDao.findSummaries(filters);
     }
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
@@ -1134,35 +786,8 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<ToolCallData[]> {
     if (!this.initialized) await this.initialize();
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const clauses: string[] = [];
-      const params: unknown[] = [];
-      if (filters.runId) {
-        clauses.push('run_id = ?');
-        params.push(filters.runId);
-      }
-      if (filters.sessionId) {
-        clauses.push('session_id = ?');
-        params.push(filters.sessionId);
-      }
-      if (filters.toolName) {
-        clauses.push('tool_name = ?');
-        params.push(filters.toolName);
-      }
-      if (filters.startTime) {
-        clauses.push('timestamp >= ?');
-        params.push(filters.startTime);
-      }
-      if (filters.endTime) {
-        clauses.push('timestamp <= ?');
-        params.push(filters.endTime);
-      }
-      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const offset = filters.offset || 0;
-      const limit = filters.limit || 100;
-      const sql = `SELECT * FROM tool_calls ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
-      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
-      return rows.map((row: any) => this.fromSqliteToolCallRow(row));
+    if (this.sqliteEnabled && this.toolCallDao) {
+      return this.toolCallDao.findMany(filters);
     }
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
@@ -1193,35 +818,8 @@ export class RequestAnalyzerStorage {
     offset?: number;
   } = {}): Promise<SubagentLinkData[]> {
     if (!this.initialized) await this.initialize();
-    if (this.sqliteEnabled && this.sqliteDb) {
-      const clauses: string[] = [];
-      const params: unknown[] = [];
-      if (filters.parentRunId) {
-        clauses.push('parent_run_id = ?');
-        params.push(filters.parentRunId);
-      }
-      if (filters.childRunId) {
-        clauses.push('child_run_id = ?');
-        params.push(filters.childRunId);
-      }
-      if (filters.parentSessionId) {
-        clauses.push('parent_session_id = ?');
-        params.push(filters.parentSessionId);
-      }
-      if (filters.startTime) {
-        clauses.push('timestamp >= ?');
-        params.push(filters.startTime);
-      }
-      if (filters.endTime) {
-        clauses.push('timestamp <= ?');
-        params.push(filters.endTime);
-      }
-      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-      const offset = filters.offset || 0;
-      const limit = filters.limit || 100;
-      const sql = `SELECT * FROM subagent_links ${where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`;
-      const rows = this.sqliteDb.prepare(sql).all(...params, limit, offset);
-      return rows.map((row: any) => this.fromSqliteSubagentLinkRow(row));
+    if (this.sqliteEnabled && this.subagentLinkDao) {
+      return this.subagentLinkDao.findMany(filters);
     }
     const offset = filters.offset || 0;
     const limit = filters.limit || 100;
@@ -1258,11 +856,11 @@ export class RequestAnalyzerStorage {
     let todayRequests = this.requests.filter(r => r.timestamp >= todayTime).length;
     let weekRequests = this.requests.filter(r => r.timestamp >= weekAgoTime).length;
     let oldestRequest = this.requests.length > 0 ? this.requests[this.requests.length - 1].timestamp : undefined;
-    if (this.sqliteEnabled && this.sqliteDb) {
-      totalRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests').get()?.c || 0);
-      todayRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ?').get(todayTime)?.c || 0);
-      weekRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ?').get(weekAgoTime)?.c || 0);
-      oldestRequest = this.sqliteDb.prepare('SELECT timestamp FROM requests ORDER BY timestamp ASC LIMIT 1').get()?.timestamp;
+    if (this.sqliteEnabled && this.requestDao) {
+      totalRequests = this.requestDao.count();
+      todayRequests = this.requestDao.countSince(todayTime);
+      weekRequests = this.requestDao.countSince(weekAgoTime);
+      oldestRequest = this.requestDao.oldestTimestamp();
     }
 
     return {
@@ -1302,25 +900,13 @@ export class RequestAnalyzerStorage {
 
   private cleanupOldRequests(): void {
     const cutoffTime = Date.now() - (this.options.retentionDays * 24 * 60 * 60 * 1000);
-    if (this.sqliteEnabled && this.sqliteDb) {
-      this.sqliteDb.prepare('DELETE FROM requests WHERE timestamp < ?').run(cutoffTime);
-      this.sqliteDb.prepare('DELETE FROM subagent_links WHERE timestamp < ?').run(cutoffTime);
-      this.sqliteDb.prepare('DELETE FROM tool_calls WHERE timestamp < ?').run(cutoffTime);
-      this.sqliteDb.prepare(
-        `DELETE FROM requests WHERE id NOT IN (
-          SELECT id FROM requests ORDER BY timestamp DESC, id DESC LIMIT ?
-        )`
-      ).run(this.options.maxRequests);
-      this.sqliteDb.prepare(
-        `DELETE FROM subagent_links WHERE id NOT IN (
-          SELECT id FROM subagent_links ORDER BY timestamp DESC, id DESC LIMIT ?
-        )`
-      ).run(this.options.maxRequests);
-      this.sqliteDb.prepare(
-        `DELETE FROM tool_calls WHERE id NOT IN (
-          SELECT id FROM tool_calls ORDER BY timestamp DESC, id DESC LIMIT ?
-        )`
-      ).run(this.options.maxRequests);
+    if (this.sqliteEnabled && this.requestDao && this.subagentLinkDao && this.toolCallDao) {
+      this.requestDao.deleteOlderThan(cutoffTime);
+      this.subagentLinkDao.deleteOlderThan(cutoffTime);
+      this.toolCallDao.deleteOlderThan(cutoffTime);
+      this.requestDao.keepTopN(this.options.maxRequests);
+      this.subagentLinkDao.keepTopN(this.options.maxRequests);
+      this.toolCallDao.keepTopN(this.options.maxRequests);
       return;
     }
     
@@ -1363,15 +949,12 @@ export class RequestAnalyzerStorage {
     let beforeRequests = this.requests.length;
     let beforeLinks = this.subagentLinks.length;
     let beforeToolCalls = this.toolCalls.length;
-    if (this.sqliteEnabled && this.sqliteDb) {
+    if (this.sqliteEnabled && this.requestDao && this.subagentLinkDao && this.toolCallDao) {
       const start = new Date(`${dateKey}T00:00:00`).getTime();
       const end = new Date(`${dateKey}T23:59:59.999`).getTime();
-      beforeRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
-      beforeLinks = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM subagent_links WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
-      beforeToolCalls = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM tool_calls WHERE timestamp >= ? AND timestamp <= ?').get(start, end)?.c || 0);
-      this.sqliteDb.prepare('DELETE FROM requests WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
-      this.sqliteDb.prepare('DELETE FROM subagent_links WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
-      this.sqliteDb.prepare('DELETE FROM tool_calls WHERE timestamp >= ? AND timestamp <= ?').run(start, end);
+      beforeRequests = this.requestDao.deleteInRange(start, end);
+      beforeLinks = this.subagentLinkDao.deleteInRange(start, end);
+      beforeToolCalls = this.toolCallDao.deleteInRange(start, end);
     } else {
       this.requests = this.requests.filter(item => this.getDateKey(item.timestamp) !== dateKey);
       this.subagentLinks = this.subagentLinks.filter(item => this.getDateKey(item.timestamp) !== dateKey);
@@ -1394,11 +977,10 @@ export class RequestAnalyzerStorage {
     let removedRequests = this.requests.length;
     let removedSubagentLinks = this.subagentLinks.length;
     let removedToolCalls = this.toolCalls.length;
-    if (this.sqliteEnabled && this.sqliteDb) {
-      removedRequests = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM requests').get()?.c || 0);
-      removedSubagentLinks = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM subagent_links').get()?.c || 0);
-      removedToolCalls = Number(this.sqliteDb.prepare('SELECT COUNT(1) as c FROM tool_calls').get()?.c || 0);
-      this.sqliteDb.exec('DELETE FROM requests; DELETE FROM subagent_links; DELETE FROM tool_calls;');
+    if (this.sqliteEnabled && this.requestDao && this.subagentLinkDao && this.toolCallDao) {
+      removedRequests = this.requestDao.deleteAll();
+      removedSubagentLinks = this.subagentLinkDao.deleteAll();
+      removedToolCalls = this.toolCallDao.deleteAll();
     } else {
       this.requests = [];
       this.subagentLinks = [];

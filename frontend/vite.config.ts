@@ -13,11 +13,19 @@ export default defineConfig({
     proxy: {
       '/plugins': {
         target: proxyTarget,
-        changeOrigin: true
+        changeOrigin: true,
+        bypass: (req) => {
+          if (req.url && req.url.startsWith('/plugins/contextscope-dev/')) {
+            if (req.url.includes('/api/')) {
+              return undefined;
+            }
+            return req.url;
+          }
+        }
       }
     }
   },
-  base: '/plugins/contextscope/',
+  base: '/plugins/contextscope-dev/',
   build: {
     outDir: 'dist',
     emptyOutDir: true

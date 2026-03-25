@@ -30,7 +30,7 @@ export const ensurePricingLoaded = async (retryCount = 0, maxRetries = 3): Promi
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 秒超时
       
-      const res = await fetch('/plugins/contextscope/api/pricing', {
+      const res = await fetch(`${import.meta.env.BASE_URL.replace(/\/+$/, '')}/api/pricing`, {
         signal: controller.signal
       })
       clearTimeout(timeoutId)
