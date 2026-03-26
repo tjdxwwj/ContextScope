@@ -31,15 +31,14 @@
     "dev": "tsc --watch",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:frontend\"",
+    "start:server": "node dist/src/server.js",
+    "dev:server": "node --watch dist/src/server.js",
     "test": "vitest",
     "preview": "cd frontend && npm run preview"
   },
   "dependencies": {
     "openclaw": "^2026.3.13",
     "tiktoken": "^1.0.22"
-  },
-  "overrides": {
-    "@hono/node-server": "^1.19.10"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
