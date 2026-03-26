@@ -41,8 +41,11 @@
     "@types/express": "^5.0.6",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "inversify": "^8.1.0",
     "openclaw": "^2026.3.13",
-    "tiktoken": "^1.0.22"
+    "reflect-metadata": "^0.2.2",
+    "tiktoken": "^1.0.22",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
