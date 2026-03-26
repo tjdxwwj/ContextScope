@@ -2,6 +2,8 @@
 
 独立运行的 HTTP 服务，与 OpenClaw 插件进程分离，避免 IO 阻塞主进程。
 
+**技术栈**: Express.js + SQLite
+
 ## 🚀 快速开始
 
 ### 1. 安装依赖
