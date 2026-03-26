@@ -8,6 +8,7 @@ import type { ITaskRepository, TaskQueryParams } from '../../../domain/task/task
 import type { TaskStatus } from '../../../shared/types/common.js';
 import { SqliteClient } from '../sqlite.client.js';
 import { DatabaseError } from '../../../shared/errors/app-error.js';
+import { TYPES } from '../../../app/container.js';
 
 /**
  * Task SQLite Repository 实现
@@ -15,7 +16,7 @@ import { DatabaseError } from '../../../shared/errors/app-error.js';
 @injectable()
 export class TaskSqliteRepository implements ITaskRepository {
   constructor(
-    @inject(SqliteClient) private readonly sqliteClient: SqliteClient
+    @inject(TYPES.SqliteClient) private readonly sqliteClient: SqliteClient
   ) {}
 
   /**

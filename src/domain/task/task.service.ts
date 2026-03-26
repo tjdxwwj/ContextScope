@@ -2,10 +2,12 @@
  * Task 领域服务
  */
 
+import { inject, injectable } from 'inversify';
 import type { ITaskRepository } from './task.repository.js';
 import { TaskEntity } from './task.entity.js';
 import { NotFoundError, DomainError } from '../../shared/errors/app-error.js';
 import type { TaskStatus } from '../../shared/types/common.js';
+import { TYPES } from '../../app/container.js';
 
 export interface CreateTaskInput {
   sessionId: string;
@@ -23,8 +25,11 @@ export interface TaskContext {
 /**
  * Task 领域服务
  */
+@injectable()
 export class TaskService {
-  constructor(private readonly taskRepo: ITaskRepository) {}
+  constructor(
+    @inject(TYPES.ITaskRepository) private readonly taskRepo: ITaskRepository
+  ) {}
 
   /**
    * 创建或获取任务

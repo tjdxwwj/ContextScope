@@ -6,6 +6,8 @@ import express, { Express } from 'express';
 import cors from 'cors';
 import { inject, injectable } from 'inversify';
 import { HooksRouter } from '../infrastructure/http/routes/hooks.router.js';
+import { ApiRouter } from '../infrastructure/http/routes/api.router.js';
+import { StaticRouter } from '../infrastructure/http/routes/static.router.js';
 import { config } from '../config/index.js';
 import { TYPES } from './container.js';
 
@@ -17,7 +19,9 @@ export class HttpServer {
   private readonly app: Express;
 
   constructor(
-    @inject(TYPES.HooksRouter) private readonly hooksRouter: HooksRouter
+    @inject(TYPES.HooksRouter) private readonly hooksRouter: HooksRouter,
+    @inject(TYPES.ApiRouter) private readonly apiRouter: ApiRouter,
+    @inject(TYPES.StaticRouter) private readonly staticRouter: StaticRouter
   ) {
     this.app = express();
     this.middleware();
@@ -54,6 +58,12 @@ export class HttpServer {
   private routes(): void {
     // Hook 路由
     this.app.use('/hooks', this.hooksRouter.getRouter());
+    
+    // API 路由
+    this.app.use('/api', this.apiRouter.getRouter());
+    
+    // Dashboard 静态文件
+    this.app.use(this.staticRouter.getRouter());
 
     // Health check
     this.app.get('/health', (req, res) => {
@@ -64,12 +74,9 @@ export class HttpServer {
       });
     });
 
-    // Stats
+    // Stats (兼容旧路径)
     this.app.get('/stats', (req, res) => {
-      res.json({
-        status: 'ok',
-        message: 'Stats endpoint - TODO: implement',
-      });
+      res.redirect('/api/stats');
     });
 
     // 404

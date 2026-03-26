@@ -37,21 +37,21 @@ export class TaskEntity implements BaseEntity {
   public readonly taskId: string;
   public readonly sessionId: string;
   public readonly sessionKey?: string;
-  public readonly status: TaskStatus;
+  public status: TaskStatus;  // ✅ 改为可变
   public readonly startTime: number;
-  public readonly endTime?: number;
-  public readonly error?: string;
+  public endTime?: number;  // ✅ 改为可变
+  public error?: string;  // ✅ 改为可变
   public readonly metadata?: TaskMetadata;
   public readonly tokenStats?: TaskTokenStats;
   public readonly stats?: TaskStats;
-  public readonly llmCalls: number;
-  public readonly toolCalls: number;
-  public readonly subagentSpawns: number;
+  public llmCalls: number;  // ✅ 改为可变
+  public toolCalls: number;  // ✅ 改为可变
+  public subagentSpawns: number;  // ✅ 改为可变
   public readonly parentTaskId?: string;
   public readonly childTaskIds?: string[];
   
   public readonly createdAt?: Date;
-  public readonly updatedAt?: Date;
+  public updatedAt?: Date;  // ✅ 改为可变
 
   constructor(props: {
     taskId: string;
@@ -96,6 +96,18 @@ export class TaskEntity implements BaseEntity {
    */
   isCompleted(): boolean {
     return this.status === 'completed' || this.status === 'error' || this.status === 'timeout' || this.status === 'aborted';
+  }
+
+  /**
+   * 更新任务状态
+   */
+  updateStatus(status: TaskStatus, error?: string): void {
+    this.status = status;
+    this.endTime = Date.now();
+    if (error) {
+      this.error = error;
+    }
+    this.updatedAt = new Date();
   }
 
   /**

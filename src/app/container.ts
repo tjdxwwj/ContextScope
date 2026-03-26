@@ -13,6 +13,8 @@ import { IRequestRepository } from '../domain/request/request.repository.js';
 import { ITaskRepository } from '../domain/task/task.repository.js';
 import { HooksRouter } from '../infrastructure/http/routes/hooks.router.js';
 import { HttpServer } from './server.js';
+import { ApiRouter } from '../infrastructure/http/routes/api.router.js';
+import { StaticRouter } from '../infrastructure/http/routes/static.router.js';
 
 /**
  * 依赖注入符号
@@ -24,6 +26,8 @@ export const TYPES = {
   RequestService: Symbol.for('RequestService'),
   TaskService: Symbol.for('TaskService'),
   HooksRouter: Symbol.for('HooksRouter'),
+  ApiRouter: Symbol.for('ApiRouter'),
+  StaticRouter: Symbol.for('StaticRouter'),
   HttpServer: Symbol.for('HttpServer'),
 };
 
@@ -46,6 +50,8 @@ export function createContainer(): Container {
   
   // HTTP Routes
   container.bind<HooksRouter>(TYPES.HooksRouter).to(HooksRouter);
+  container.bind<ApiRouter>(TYPES.ApiRouter).to(ApiRouter);
+  container.bind<StaticRouter>(TYPES.StaticRouter).to(StaticRouter);
   
   // HTTP Server
   container.bind<HttpServer>(TYPES.HttpServer).to(HttpServer);

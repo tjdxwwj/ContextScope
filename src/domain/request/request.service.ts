@@ -2,9 +2,11 @@
  * Request 领域服务
  */
 
+import { inject, injectable } from 'inversify';
 import type { IRequestRepository } from './request.repository.js';
 import { RequestEntity } from './request.entity.js';
 import { NotFoundError } from '../../shared/errors/app-error.js';
+import { TYPES } from '../../app/container.js';
 
 export interface CreateRequestInput {
   type: 'input' | 'output';
@@ -32,8 +34,11 @@ export interface CreateRequestInput {
 /**
  * Request 领域服务
  */
+@injectable()
 export class RequestService {
-  constructor(private readonly requestRepo: IRequestRepository) {}
+  constructor(
+    @inject(TYPES.IRequestRepository) private readonly requestRepo: IRequestRepository
+  ) {}
 
   /**
    * 创建请求
