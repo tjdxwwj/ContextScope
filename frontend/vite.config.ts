@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const proxyTarget = process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:18789'
+const proxyTarget = process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:18790'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -11,17 +11,10 @@ export default defineConfig({
     host: true,  // 允许外部访问
     strictPort: true,  // 端口被占用时报错而不是自动切换
     proxy: {
-      '/plugins': {
+      '/plugins/contextscope-dev/api': {
         target: proxyTarget,
         changeOrigin: true,
-        bypass: (req) => {
-          if (req.url && req.url.startsWith('/plugins/contextscope-dev/')) {
-            if (req.url.includes('/api/')) {
-              return undefined;
-            }
-            return req.url;
-          }
-        }
+        rewrite: (path) => path.replace(/^\/plugins\/contextscope-dev\/api/, '/api'),
       }
     }
   },

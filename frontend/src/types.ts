@@ -152,3 +152,49 @@ export interface TokenTrendPoint {
   output: number
   total: number
 }
+
+// --- Context Reducer types ---
+
+export interface ReductionDetail {
+  toolName: string
+  toolCallId?: string
+  contentBefore: string
+  contentAfter: string
+}
+
+export interface ReductionEntry {
+  reducer: string
+  tokensSaved: number
+  itemsProcessed: number
+  details?: ReductionDetail[]
+}
+
+export interface ReductionLogEntry {
+  id?: number
+  timestamp: string
+  sessionId: string
+  stage: string
+  messageCountBefore: number
+  messageCountAfter: number
+  tokensBefore: number
+  tokensAfter: number
+  tokensSaved: number
+  reductions: ReductionEntry[]
+  durationMs: number
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ReductionLogsResponse {
+  total: number
+  data: ReductionLogEntry[]
+}
+
+export interface ReductionSummary {
+  totalRecords: number
+  totalTokensSaved: number
+  totalTokensBefore: number
+  totalTokensAfter: number
+  averageSavingRate: number
+  reducerContributions: Record<string, { tokensSaved: number; count: number }>
+}

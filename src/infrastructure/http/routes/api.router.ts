@@ -6,7 +6,8 @@ import { Router, Request, Response } from 'express';
 import { inject, injectable } from 'inversify';
 import { RequestService } from '../../../domain/request/request.service.js';
 import { TaskService } from '../../../domain/task/task.service.js';
-import { TYPES } from '../../../app/container.js';
+import type { IReductionLogRepository } from '../../../domain/context-reducer/reduction-log.repository.js';
+import { TYPES } from '../../../app/types.js';
 
 /**
  * API 路由
@@ -17,7 +18,8 @@ export class ApiRouter {
 
   constructor(
     @inject(TYPES.RequestService) private readonly requestService: RequestService,
-    @inject(TYPES.TaskService) private readonly taskService: TaskService
+    @inject(TYPES.TaskService) private readonly taskService: TaskService,
+    @inject(TYPES.IReductionLogRepository) private readonly reductionLogRepo: IReductionLogRepository
   ) {
     this.router = Router();
     this.routes();
@@ -41,6 +43,12 @@ export class ApiRouter {
 
     // GET /api/tasks/:taskId/tree - 任务树
     this.router.get('/tasks/:taskId/tree', this.getTaskTree.bind(this));
+
+    // GET /api/reduction-logs - 裁剪日志列表
+    this.router.get('/reduction-logs', this.getReductionLogs.bind(this));
+
+    // GET /api/reduction-logs/summary - 裁剪统计摘要
+    this.router.get('/reduction-logs/summary', this.getReductionLogsSummary.bind(this));
 
     // DELETE /api/cache - 清除缓存
     this.router.delete('/cache', this.clearCache.bind(this));
@@ -94,7 +102,7 @@ export class ApiRouter {
 
       res.json({
         ok: true,
-        data: result.data,
+        requests: result.data,
         pagination: {
           total: result.total,
           page: result.page,
@@ -197,6 +205,75 @@ export class ApiRouter {
       });
     } catch (error) {
       console.error('[ApiRouter] clearCache error:', error);
+      res.status(500).json({ ok: false, error: String(error) });
+    }
+  }
+
+  /**
+   * 获取裁剪日志列表
+   */
+  private async getReductionLogs(req: Request, res: Response): Promise<void> {
+    try {
+      const { limit, sessionId } = req.query;
+      const logs = await this.reductionLogRepo.findRecent(
+        limit ? Number(limit) : 100,
+        sessionId as string | undefined
+      );
+
+      res.json({
+        ok: true,
+        data: logs,
+        total: logs.length,
+      });
+    } catch (error) {
+      console.error('[ApiRouter] getReductionLogs error:', error);
+      res.status(500).json({ ok: false, error: String(error) });
+    }
+  }
+
+  /**
+   * 获取裁剪统计摘要
+   */
+  private async getReductionLogsSummary(req: Request, res: Response): Promise<void> {
+    try {
+      const { sessionId } = req.query;
+      const stats = await this.reductionLogRepo.getStats(sessionId as string | undefined);
+      const logs = await this.reductionLogRepo.findRecent(500, sessionId as string | undefined);
+
+      // 计算各 reducer 的贡献
+      const reducerContributions: Record<string, { tokensSaved: number; count: number }> = {};
+      let totalTokensBefore = 0;
+      let totalTokensAfter = 0;
+
+      for (const log of logs) {
+        totalTokensBefore += log.tokensBefore;
+        totalTokensAfter += log.tokensAfter;
+        for (const reduction of log.reductions) {
+          if (!reducerContributions[reduction.reducer]) {
+            reducerContributions[reduction.reducer] = { tokensSaved: 0, count: 0 };
+          }
+          reducerContributions[reduction.reducer].tokensSaved += reduction.tokensSaved;
+          reducerContributions[reduction.reducer].count += reduction.itemsProcessed;
+        }
+      }
+
+      const averageSavingRate = totalTokensBefore > 0
+        ? Math.round((stats.totalTokensSaved / totalTokensBefore) * 10000) / 100
+        : 0;
+
+      res.json({
+        ok: true,
+        data: {
+          totalRecords: stats.totalReductions,
+          totalTokensSaved: stats.totalTokensSaved,
+          totalTokensBefore,
+          totalTokensAfter,
+          averageSavingRate,
+          reducerContributions,
+        },
+      });
+    } catch (error) {
+      console.error('[ApiRouter] getReductionLogsSummary error:', error);
       res.status(500).json({ ok: false, error: String(error) });
     }
   }

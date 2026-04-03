@@ -1,8 +1,16 @@
 {
-  "id": "openclaw-contextscope-dev",
+  "id": "contextscope",
   "name": "ContextScope (Dev)",
   "description": "Visualize and analyze API requests, prompts, completions, and token usage in real-time",
   "uiHints": {
+    "contextReducer.enabled": {
+      "label": "Enable Context Reducer",
+      "help": "Intelligently reduce context tokens sent to LLM by trimming old tool calls, deduplicating results, and previewing large content"
+    },
+    "contextReducer.preserveRecentTurns": {
+      "label": "Preserve Recent Turns",
+      "help": "Number of recent assistant turns to keep untouched (default: 2)"
+    },
     "storage.maxRequests": {
       "label": "Max Requests to Store",
       "help": "Maximum number of requests to keep in storage (older requests will be removed)",
@@ -39,6 +47,62 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "contextReducer": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "preserveRecentTurns": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 20,
+            "default": 2
+          },
+          "toolInputTrimmer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "maxInputChars": { "type": "number", "default": 200 }
+            }
+          },
+          "toolResultPrioritizer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "lowPriorityMaxChars": { "type": "number", "default": 100 }
+            }
+          },
+          "contentPreviewer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "minContentChars": { "type": "number", "default": 500 },
+              "headLines": { "type": "number", "default": 10 },
+              "tailLines": { "type": "number", "default": 5 }
+            }
+          },
+          "duplicateDeduper": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          },
+          "logging": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true }
+            }
+          }
+        }
+      },
       "storage": {
         "type": "object",
         "additionalProperties": false,

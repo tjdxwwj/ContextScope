@@ -8,7 +8,7 @@ import type { IRequestRepository, RequestQueryParams } from '../../../domain/req
 import type { PaginatedResult } from '../../../shared/types/common.js';
 import { SqliteClient } from '../sqlite.client.js';
 import { DatabaseError } from '../../../shared/errors/app-error.js';
-import { TYPES } from '../../../app/container.js';
+import { TYPES } from '../../../app/types.js';
 
 /**
  * Request SQLite Repository 实现

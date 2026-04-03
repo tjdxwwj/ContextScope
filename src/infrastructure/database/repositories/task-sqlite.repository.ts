@@ -8,7 +8,7 @@ import type { ITaskRepository, TaskQueryParams } from '../../../domain/task/task
 import type { TaskStatus } from '../../../shared/types/common.js';
 import { SqliteClient } from '../sqlite.client.js';
 import { DatabaseError } from '../../../shared/errors/app-error.js';
-import { TYPES } from '../../../app/container.js';
+import { TYPES } from '../../../app/types.js';
 
 /**
  * Task SQLite Repository 实现

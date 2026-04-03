@@ -9,3 +9,4 @@ docs/requests.json
 frontend/public/data/requests.json
 *.pem
 *.key
+.claude

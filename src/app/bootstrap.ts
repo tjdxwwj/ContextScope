@@ -4,7 +4,8 @@
 
 import 'reflect-metadata';
 import { Container } from 'inversify';
-import { createContainer, TYPES } from './container.js';
+import { createContainer } from './container.js';
+import { TYPES } from './types.js';
 import { SqliteClient } from '../infrastructure/database/sqlite.client.js';
 import { HttpServer } from './server.js';
 import { config } from '../config/index.js';

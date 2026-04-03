@@ -40,8 +40,11 @@ export class StaticRouter {
   }
 
   private routes(): void {
-    // 提供静态文件
-    this.router.get('/plugins/contextscope*', (req, res) => {
+    // 提供静态文件（Express 5 需要命名通配符参数）
+    this.router.get('/plugins/contextscope{/*path}', (req, res) => {
+      this.serveFrontend(req, res);
+    });
+    this.router.get('/plugins/contextscope', (req, res) => {
       this.serveFrontend(req, res);
     });
   }

@@ -3,6 +3,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { injectable } from 'inversify';
 import { config } from '../../config/index.js';
 import { DatabaseError } from '../../shared/errors/app-error.js';
@@ -113,6 +115,27 @@ const MIGRATIONS = [
   `,
   'CREATE INDEX IF NOT EXISTS idx_subagent_links_parentRunId ON subagent_links(parentRunId)',
   'CREATE INDEX IF NOT EXISTS idx_subagent_links_childRunId ON subagent_links(childRunId)',
+
+  // Reduction Logs 表
+  `
+  CREATE TABLE IF NOT EXISTS reduction_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    sessionId TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    messageCountBefore INTEGER NOT NULL,
+    messageCountAfter INTEGER NOT NULL,
+    tokensBefore INTEGER NOT NULL,
+    tokensAfter INTEGER NOT NULL,
+    tokensSaved INTEGER NOT NULL,
+    reductions TEXT,
+    durationMs INTEGER NOT NULL,
+    createdAt INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+    updatedAt INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+  )
+  `,
+  'CREATE INDEX IF NOT EXISTS idx_reduction_logs_sessionId ON reduction_logs(sessionId)',
+  'CREATE INDEX IF NOT EXISTS idx_reduction_logs_createdAt ON reduction_logs(createdAt)',
 ];
 
 /**
@@ -140,8 +163,9 @@ export class SqliteClient {
 
     try {
       const dbPath = this.getDatabasePath();
+      mkdirSync(dirname(dbPath), { recursive: true });
       console.log(`[Database] Creating SQLite database at: ${dbPath}`);
-      
+
       this.db = new DatabaseSync(dbPath);
       
       // 执行迁移

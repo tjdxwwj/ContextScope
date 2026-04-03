@@ -9,7 +9,7 @@ import { HooksRouter } from '../infrastructure/http/routes/hooks.router.js';
 import { ApiRouter } from '../infrastructure/http/routes/api.router.js';
 import { StaticRouter } from '../infrastructure/http/routes/static.router.js';
 import { config } from '../config/index.js';
-import { TYPES } from './container.js';
+import { TYPES } from './types.js';
 
 /**
  * HTTP 服务器

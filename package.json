@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-contextscope",
+  "name": "contextscope",
   "version": "0.0.1",
   "description": "ContextScope - visualize API requests, prompts, and token usage",
   "type": "module",
@@ -31,8 +31,8 @@
     "dev": "tsc --watch",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:frontend\"",
-    "start:server": "node dist/src/server.js",
-    "dev:server": "node --watch dist/src/server.js",
+    "start:server": "node dist/src/app/main.js",
+    "dev:server": "node --watch dist/src/app/main.js",
     "test": "vitest",
     "preview": "cd frontend && npm run preview"
   },
@@ -41,7 +41,7 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "inversify": "^8.1.0",
-    "openclaw": "^2026.3.13",
+    "openclaw": "^2026.4.1",
     "reflect-metadata": "^0.2.2",
     "tiktoken": "^1.0.22",
     "zod": "^4.3.6"

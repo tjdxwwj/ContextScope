@@ -6,7 +6,7 @@ import { inject, injectable } from 'inversify';
 import type { IRequestRepository } from './request.repository.js';
 import { RequestEntity } from './request.entity.js';
 import { NotFoundError } from '../../shared/errors/app-error.js';
-import { TYPES } from '../../app/container.js';
+import { TYPES } from '../../app/types.js';
 
 export interface CreateRequestInput {
   type: 'input' | 'output';

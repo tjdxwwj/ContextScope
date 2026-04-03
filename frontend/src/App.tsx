@@ -26,6 +26,7 @@ import { StatusBadge } from './components/StatusBadge'
 import { TaskTimeline } from './components/TaskTimeline'
 import { TokenTreemap } from './components/TokenTreemap'
 import { GlobalOverview } from './components/GlobalOverview'
+import { ContextReducerPanel } from './components/ContextReducerPanel'
 import { loadLocalStore, loadRealTimeData } from './data/loadData'
 import { LanguageSwitch, useI18n } from './i18n'
 import {
@@ -453,7 +454,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'overview' | 'task'>('task')
-  const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap' | 'pricing'>('timeline')
+  const [overviewTab, setOverviewTab] = useState<'timeline' | 'treemap' | 'pricing' | 'reducer'>('timeline')
   const [dateFilter, setDateFilter] = useState<{ date?: string, startDate?: string, endDate?: string }>(() => getTodayDateFilter())
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [isClearingCache, setIsClearingCache] = useState(false)
@@ -1209,11 +1210,25 @@ export default function App() {
                   >
                     模型价格
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverviewTab('reducer')}
+                    className={cn(
+                      'px-4 py-2 text-xs font-bold rounded-lg transition-all',
+                      overviewTab === 'reducer'
+                        ? 'bg-white text-blue-600 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    )}
+                  >
+                    Context Reducer
+                  </button>
                 </div>
                 {overviewTab === 'timeline' ? (
                   <GlobalOverview runs={roots} onLocate={handleLocate} />
                 ) : overviewTab === 'treemap' ? (
                   <TokenTreemap runs={roots} />
+                ) : overviewTab === 'reducer' ? (
+                  <ContextReducerPanel />
                 ) : (
                   <PricingTable />
                 )}

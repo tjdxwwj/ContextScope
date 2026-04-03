@@ -7,7 +7,7 @@ import type { ITaskRepository } from './task.repository.js';
 import { TaskEntity } from './task.entity.js';
 import { NotFoundError, DomainError } from '../../shared/errors/app-error.js';
 import type { TaskStatus } from '../../shared/types/common.js';
-import { TYPES } from '../../app/container.js';
+import { TYPES } from '../../app/types.js';
 
 export interface CreateTaskInput {
   sessionId: string;

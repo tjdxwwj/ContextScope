@@ -206,6 +206,25 @@ const translations = {
     'treemap.outputTokens': 'Output',
     'treemap.totalTokens': 'Total',
     
+    // Context Reducer
+    'reducer.totalTokensSaved': 'Total Tokens Saved',
+    'reducer.totalRecords': 'Total Records',
+    'reducer.avgSavingRate': 'Avg Saving Rate',
+    'reducer.tokenTrends': 'Token Trends',
+    'reducer.contributions': 'Reducer Contributions',
+    'reducer.noData': 'No data',
+    'reducer.logs': 'Reduction Logs',
+    'reducer.time': 'Time',
+    'reducer.stage': 'Stage',
+    'reducer.before': 'Before',
+    'reducer.after': 'After',
+    'reducer.saved': 'Saved',
+    'reducer.reducers': 'Reducers',
+    'reducer.duration': 'Duration',
+    'reducer.noDetails': 'No details',
+    'reducer.records': 'records',
+    'reducer.loading': 'Loading context reducer data...',
+
     // Labels
     'label.systemPrompt': 'System Prompt',
     'label.currentUserPrompt': 'Current User Prompt',
@@ -413,6 +432,25 @@ const translations = {
     'treemap.outputTokens': '输出',
     'treemap.totalTokens': '总计',
     
+    // Context Reducer
+    'reducer.totalTokensSaved': '总节省 Token',
+    'reducer.totalRecords': '总记录数',
+    'reducer.avgSavingRate': '平均节省率',
+    'reducer.tokenTrends': 'Token 趋势',
+    'reducer.contributions': 'Reducer 贡献占比',
+    'reducer.noData': '暂无数据',
+    'reducer.logs': '裁剪日志',
+    'reducer.time': '时间',
+    'reducer.stage': '阶段',
+    'reducer.before': '裁剪前',
+    'reducer.after': '裁剪后',
+    'reducer.saved': '节省',
+    'reducer.reducers': '策略',
+    'reducer.duration': '耗时',
+    'reducer.noDetails': '无详情',
+    'reducer.records': '条记录',
+    'reducer.loading': '正在加载上下文裁剪数据...',
+
     // Labels
     'label.systemPrompt': 'System Prompt',
     'label.currentUserPrompt': 'Current User Prompt',

@@ -4,6 +4,7 @@
  */
 
 import type { RawStore, RequestData, SubagentLinkData, ToolCallData } from './rawTypes'
+import type { ReductionLogsResponse, ReductionSummary } from '../types'
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/+$/, '') + '/api'
 const API_REQUEST_TIMEOUT_MS = 25000
@@ -798,4 +799,34 @@ export async function fetchContext(
         reject(error)
       })
   })
+}
+
+export async function fetchReductionLogs(limit = 100, offset = 0): Promise<ReductionLogsResponse | null> {
+  try {
+    const params = new URLSearchParams()
+    params.append('limit', String(limit))
+    if (offset > 0) params.append('offset', String(offset))
+    const res = await fetchWithTimeout(`${API_BASE}/reduction-logs?${params.toString()}`, {}, API_REQUEST_TIMEOUT_MS)
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      total: data?.total ?? 0,
+      data: Array.isArray(data?.data) ? data.data : [],
+    }
+  } catch (error) {
+    console.error('Failed to fetch reduction logs:', error)
+    return null
+  }
+}
+
+export async function fetchReductionSummary(): Promise<ReductionSummary | null> {
+  try {
+    const res = await fetchWithTimeout(`${API_BASE}/reduction-logs/summary`, {}, API_REQUEST_TIMEOUT_MS)
+    if (!res.ok) return null
+    const data = await res.json()
+    return data?.data ?? null
+  } catch (error) {
+    console.error('Failed to fetch reduction summary:', error)
+    return null
+  }
 }
