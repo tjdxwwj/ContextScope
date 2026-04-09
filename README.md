@@ -50,6 +50,10 @@ Unlike OpenClaw's built-in observability tools, **ContextScope** provides:
 ![Context Treemap](screenshots/context-treemap.png)
 *Visualize message importance and token distribution*
 
+### Context Reducer
+![Context Reducer](screenshots/context-reducer.png)
+*Example: only **four** reduction runs (“Total Records”, i.e. four `before_prompt_build` rounds in this session) already yield an **average saving rate of ~60%** on tokens sent to the model — trends, per-reducer contributions, and logs.*
+
 ## ✨ Key Features
 
 ### 1. Cost Transparency — Know Where Your Money Goes
@@ -63,7 +67,7 @@ Unlike OpenClaw's built-in observability tools, **ContextScope** provides:
 - Live request/response capture with zero configuration
 - WebSocket-free polling with configurable refresh intervals
 
-### 2. Token-Level Context Analysis
+### 3. Token-Level Context Analysis
 ```
 System Prompt:  1,234 tokens (12%)
 History:        5,678 tokens (56%)
@@ -73,49 +77,85 @@ Output:          901 tokens (9%)
 - Understand exactly where your tokens go
 - Identify context bloat and optimization opportunities
 
-### 3. Context Treemap Visualization
+### 4. Context Treemap Visualization
 - Visual representation of message impact scores
 - Quickly identify which historical messages matter most
 - Optimize context window usage
 
-### 4. Subagent & Tool Call Tracing
+### 5. Subagent & Tool Call Tracing
 - Complete parent-child run hierarchy
 - Tool call dependency graph
 - Subagent spawn/send/ended lifecycle tracking
 
-### 5. Cost Analytics & Alerts
+### 6. Cost Analytics & Alerts
 - Model-based cost estimation (OpenAI, Anthropic, etc.)
 - Configurable token and cost thresholds
 - Real-time alerting for expensive operations
 
-## 📦 Installation
+## 🧠 Context reduction pipeline
+
+ContextScope can **compress the conversation before it is sent to the LLM** using the `before_prompt_build` hook. A fixed **pipeline** of reducers **mutates the `messages` array in place** (same references OpenClaw uses) to reduce tokens.
+
+Dashboard example: see **Context Reducer** in the Screenshots section above — in that run, **four** logged reductions (**Total Records**) show an **~60% average saving rate** with per-reducer contributions (e.g. `contentPreviewer`, `toolResultPrioritizer`).
+
+**Reducer order** (dedupe first so later steps see unique content):
+
+| Step | Reducer | What it does |
+|------|---------|----------------|
+| 1 | **duplicateDeduper** | If the same tool is invoked with the same arguments repeatedly, older tool results are replaced with a short placeholder; the newest matching result is kept. |
+| 2 | **toolInputTrimmer** | For assistant turns **before** the last `preserveRecentTurns` “turns”, long **tool call arguments** are shortened. Calls linked to **error** tool results are preserved. |
+| 3 | **contentPreviewer** | Large tool results in older turns become a **head + tail** line preview (configurable line counts). Write-style tools (e.g. `write_file`) are skipped here and handled in step 4. |
+| 4 | **toolResultPrioritizer** | **Errors** stay intact; **successful write-style** tool outputs become placeholders; other long results are **truncated** to a max character budget. |
+
+**Cross-cutting options**
+
+- **`preserveRecentTurns`** — How many recent assistant turns are largely left untouched by the reducers (default in code: `2`).
+- **`logging`** — When enabled, each run records reduction stats (best-effort; failures never break the agent).
+
+Tune these under `contextReducer` in your plugin config; see `openclaw.plugin.json` for the full schema and defaults.
+
+## 📦 Installation & first run
+
+This README treats **install from a local clone** as the primary workflow (build → `install -l` → restart gateway). The npm package is listed as an alternative.
+
+### From this repository (development / local path)
+
+After OpenClaw loads the plugin, ContextScope **starts its own HTTP server** (default **`127.0.0.1:18790`**, override with env `PORT`). That process serves **REST APIs** (`/api/...`) and the **dashboard** at `/plugins/contextscope` when `dist/frontend` exists (`npm run build:all`).
 
 ```bash
-# Install via OpenClaw CLI
-openclaw plugins install openclaw-contextscope
+cd /path/to/ContextScope
+npm install
+npm run build              # TypeScript → dist/index.js (required)
+# Optional: bundle the React dashboard into dist/frontend
+npm run build:all
 
-# Or install specific version
-openclaw plugins install openclaw-contextscope@latest
-```
-
-## 🎯 Quick Start
-
-### 1. Automatic (Recommended)
-Simply restart OpenClaw gateway:
-```bash
+openclaw plugins install -l /path/to/ContextScope
+openclaw plugins list
 openclaw gateway restart
 ```
 
-ContextScope will:
-- ✅ Print a prominent dashboard URL in terminal
-- ✅ Automatically open your browser
-- ✅ Start capturing requests immediately
+- **Plugin id** in this repo is **`contextscope`** (`openclaw.plugin.json`). The published npm plugin may use another id — always match **`openclaw plugins list`** under `plugins.entries` in `openclaw.json` / `openclaw.yaml`.
 
-### 2. Manual Access
-Visit: `http://localhost:18789/plugins/contextscope`
+### From npm (registry)
 
-### 3. Chat Commands
-In any OpenClaw conversation:
+```bash
+openclaw plugins install openclaw-contextscope@latest
+openclaw gateway restart
+openclaw plugins list
+```
+
+### Open the dashboard & APIs
+
+| What | URL (defaults) |
+|------|----------------|
+| **Dashboard** (served by ContextScope) | `http://127.0.0.1:18790/plugins/contextscope` |
+| **REST API** (same process) | `http://127.0.0.1:18790/api/...` |
+| **Via OpenClaw gateway** (if your gateway proxies the plugin UI) | Often `http://localhost:18789/plugins/contextscope` — **gateway port varies** |
+
+If the terminal prints a different URL after startup, prefer that. Confirm the plugin is **loaded** with `openclaw plugins list`.
+
+### Chat commands (optional)
+
 ```
 /analyzer         # Show plugin status
 /analyzer stats   # View detailed statistics
@@ -125,13 +165,20 @@ In any OpenClaw conversation:
 
 ## ⚙️ Configuration
 
-Edit your `~/.openclaw/openclaw.json`:
+Edit your OpenClaw config. Common locations:
+
+- `~/.openclaw/openclaw.json` (JSON)
+- `openclaw.yaml` in the same directory if your setup uses YAML—**same structure**, different syntax.
+
+Under `plugins.entries.<pluginId>.config`, set storage, visualization, capture, alerts, and **`contextReducer`** for the pipeline. Each reducer can be turned **on or off** with its own `enabled` flag; set top-level `contextReducer.enabled` to `false` to disable the whole pipeline.
+
+The JSON key under `entries` must match **`openclaw plugins list`** — **`contextscope`** for a local `install -l` of this repo; **`openclaw-contextscope`** is typical for the npm package.
 
 ```json
 {
   "plugins": {
     "entries": {
-      "openclaw-contextscope": {
+      "contextscope": {
         "enabled": true,
         "config": {
           "storage": {
@@ -153,6 +200,20 @@ Edit your `~/.openclaw/openclaw.json`:
             "enabled": true,
             "tokenThreshold": 50000,
             "costThreshold": 10.0
+          },
+          "contextReducer": {
+            "enabled": true,
+            "preserveRecentTurns": 2,
+            "duplicateDeduper": { "enabled": true },
+            "toolInputTrimmer": { "enabled": true, "maxInputChars": 200 },
+            "contentPreviewer": {
+              "enabled": true,
+              "minContentChars": 500,
+              "headLines": 10,
+              "tailLines": 5
+            },
+            "toolResultPrioritizer": { "enabled": true, "lowPriorityMaxChars": 100 },
+            "logging": { "enabled": true }
           }
         }
       }
@@ -161,20 +222,48 @@ Edit your `~/.openclaw/openclaw.json`:
 }
 ```
 
+**YAML example** (same `contextReducer` shape; rename `contextscope` if your `openclaw plugins list` shows another id):
+
+```yaml
+plugins:
+  entries:
+    contextscope:
+      enabled: true
+      config:
+        contextReducer:
+          enabled: true
+          preserveRecentTurns: 2
+          duplicateDeduper:
+            enabled: false
+          toolInputTrimmer:
+            enabled: true
+            maxInputChars: 200
+          contentPreviewer:
+            enabled: true
+            minContentChars: 500
+            headLines: 10
+            tailLines: 5
+          toolResultPrioritizer:
+            enabled: true
+            lowPriorityMaxChars: 100
+          logging:
+            enabled: true
+```
+
+Setting `duplicateDeduper.enabled` to `false` skips only that step; the pipeline still runs the other reducers in order.
+
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    OpenClaw Gateway                      │
-│  ┌─────────────────┐         ┌──────────────────────┐  │
-│  │  ContextScope   │◄───────►│   React Dashboard    │  │
-│  │  Plugin Core    │  HTTP   │   (Vite + Tailwind)  │  │
-│  │                 │         │                      │  │
-│  │ • LLM Hooks     │         │ • Real-time Charts   │  │
-│  │ • Task Tracker  │         │ • Interactive Tables │  │
-│  │ • Token Counter │         │ • Export Tools       │  │
-│  └────────┬────────┘         └──────────────────────┘  │
-│           │                                              │
+│  ┌──────────────────────────────┐                      │
+│  │  ContextScope plugin         │  HTTP :18790 (PORT)  │
+│  │  • dist/index.js + hooks     │  /api/* , /plugins/… │
+│  │  • Embedded Express server   │                      │
+│  └────────┬─────────────────────┘                      │
+│           │         ▲                                    │
+│           │         └── React dashboard (dist/frontend) │
 │           ▼                                              │
 │  ┌─────────────────┐                                    │
 │  │  JSONL Storage  │  ~/.openclaw/contextscope/         │
@@ -183,7 +272,11 @@ Edit your `~/.openclaw/openclaw.json`:
 └─────────────────────────────────────────────────────────┘
 ```
 
+The gateway may also reverse-proxy the UI on another host/port; **APIs in this repo are implemented on the plugin process** (default **`127.0.0.1:18790`**).
+
 ## 📊 API Endpoints
+
+Base URL (default): `http://127.0.0.1:18790`
 
 | Endpoint | Description |
 |----------|-------------|
@@ -194,6 +287,8 @@ Edit your `~/.openclaw/openclaw.json`:
 | `GET /api/export?format=json\|csv` | Data export |
 | `GET /api/timeline` | Timeline data for visualization |
 | `GET /api/chains` | Request chain relationships |
+| `GET /api/reduction-logs` | Context reducer run logs |
+| `GET /api/reduction-logs/summary` | Aggregated reducer stats |
 
 ## 🔧 Development
 
@@ -201,24 +296,27 @@ Edit your `~/.openclaw/openclaw.json`:
 - Node.js 18+
 - OpenClaw CLI installed
 
-### Backend (Plugin)
+### Backend (plugin core)
 ```bash
-cd openclaw-contextscope
+cd ContextScope   # repository root
 npm install
-npm run build:backend
+npm run build       # same as npm run build:backend (tsc)
 ```
 
-### Frontend (Dashboard)
+### Frontend (dashboard)
 ```bash
-cd openclaw-contextscope/frontend
+cd ContextScope/frontend
 npm install
-npm run dev        # Development server
-npm run build      # Production build
+npm run dev         # Vite dev server
+npm run build       # Production assets → frontend/dist
 ```
 
-### Full Build
+### Full build & local install
 ```bash
-npm run build:all  # Builds both frontend and backend
+cd ContextScope
+npm run build:all   # backend tsc + copy frontend/dist → dist/frontend
+openclaw plugins install -l "$(pwd)"
+openclaw gateway restart
 ```
 
 ## 🆚 Comparison with Alternatives

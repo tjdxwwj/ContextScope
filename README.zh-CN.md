@@ -50,6 +50,10 @@
 ![上下文矩形树图](screenshots/context-treemap.png)
 *可视化消息重要性和 Token 分布*
 
+### 上下文裁剪（Context Reducer）
+![上下文裁剪](screenshots/context-reducer.png)
+*示例：仅 **4** 条裁剪记录（图中「总记录数」，对应本会话里约 **4 轮** `before_prompt_build`），平均节省率即达 **近 60%** —— 趋势、各策略贡献与日志。*
+
 ## ✨ 核心功能
 
 ### 1. 成本透明 —— 知道你的钱花在哪里
@@ -88,34 +92,70 @@
 - 可配置的 Token 和成本阈值
 - 高成本操作实时告警
 
-## 📦 安装
+## 🧠 上下文裁剪（Context Reducer）
+
+ContextScope 在 **`before_prompt_build`** 阶段对即将发给模型的对话做 **原地压缩**（与 OpenClaw 使用同一 `messages` 引用），通过固定顺序的 **pipeline** 减少 Token。
+
+看板示例见上方 **项目截图** 中的 **上下文裁剪**：该次仅 **4** 条裁剪记录（**总记录数**），平均节省约 **60%**，并展示各 reducer 贡献（如 `contentPreviewer`、`toolResultPrioritizer`）。
+
+**执行顺序**（先去重，后续步骤再处理唯一内容）：
+
+| 步骤 | 策略 | 作用 |
+|------|------|------|
+| 1 | **duplicateDeduper（去重）** | 同一工具、相同参数多次调用时，较早的 tool 结果替换为简短占位，保留较新的一条。 |
+| 2 | **toolInputTrimmer（参数裁剪）** | 对「最近 N 轮」**之前**的 assistant 消息里，过长的 **tool call 参数**做截断/摘要；与 **error** tool 结果配对的调用会保留。 |
+| 3 | **contentPreviewer（大段预览）** | 旧轮中过大的 tool 结果改为 **前若干行 + 后若干行** 预览；写文件等写操作类工具在此步跳过，由下一步处理。 |
+| 4 | **toolResultPrioritizer（结果分级）** | **错误**结果保留；**写操作成功**结果压成占位；其余过长内容按上限 **截断**。 |
+
+**横切配置**
+
+- **`preserveRecentTurns`** — 最近多少轮 assistant 侧内容尽量不动（代码默认 **2**）。
+- **`logging`** — 是否记录每次裁剪的统计（尽力而为，失败不影响主流程）。
+
+在插件配置的 **`contextReducer`** 下调整；完整字段与默认值见仓库中的 `openclaw.plugin.json`。
+
+## 📦 安装与首次运行
+
+下文以 **本地克隆 + `npm run build` + `openclaw plugins install -l`** 为主流程；从 npm 安装为备选。
+
+### 从本仓库安装（开发 / 本地路径）
+
+OpenClaw 加载插件后，ContextScope 会 **自行启动 HTTP 服务**（默认 **`127.0.0.1:18790`**，环境变量 `PORT` 可改）。该进程提供 **`/api/...` REST** 与 **`/plugins/contextscope` 看板**（需已执行 `npm run build:all` 生成 `dist/frontend`）。
 
 ```bash
-# 通过 OpenClaw CLI 安装
-openclaw plugins install openclaw-contextscope
+cd /path/to/ContextScope
+npm install
+npm run build              # 编译后端 → dist/index.js（必须）
+# 可选：打包前端到 dist/frontend
+npm run build:all
 
-# 或安装特定版本
-openclaw plugins install openclaw-contextscope@latest
-```
-
-## 🎯 快速开始
-
-### 1. 自动模式（推荐）
-简单重启 OpenClaw 网关：
-```bash
+openclaw plugins install -l /path/to/ContextScope
+openclaw plugins list
 openclaw gateway restart
 ```
 
-ContextScope 将自动：
-- ✅ 在终端打印醒目的仪表板 URL
-- ✅ 自动打开浏览器
-- ✅ 立即开始捕获请求
+- 本仓库在 `openclaw.plugin.json` 中的 id 为 **`contextscope`**；npm 包可能不同 —— 务必与 **`openclaw plugins list`** 中 `plugins.entries` 的键名一致。
 
-### 2. 手动访问
-访问：`http://localhost:18789/plugins/contextscope`
+### 从 npm 安装
 
-### 3. 聊天命令
-在任何 OpenClaw 对话中输入：
+```bash
+openclaw plugins install openclaw-contextscope@latest
+openclaw gateway restart
+openclaw plugins list
+```
+
+### 打开看板与接口
+
+| 说明 | 默认地址 |
+|------|----------|
+| **看板**（由 ContextScope 进程提供） | `http://127.0.0.1:18790/plugins/contextscope` |
+| **REST API**（同一进程） | `http://127.0.0.1:18790/api/...` |
+| **经 OpenClaw 网关访问**（若网关做了反向代理） | 常见为 `http://localhost:18789/plugins/contextscope`，**网关端口以你的环境为准** |
+
+终端若打印其它访问地址，以实际输出为准。安装后请用 **`openclaw plugins list`** 确认插件已加载。
+
+### 聊天命令（可选）
+
 ```
 /analyzer         # 显示插件状态
 /analyzer stats   # 查看详细统计
@@ -125,13 +165,20 @@ ContextScope 将自动：
 
 ## ⚙️ 配置
 
-编辑你的 `~/.openclaw/openclaw.json`：
+编辑 OpenClaw 配置，常见位置：
+
+- `~/.openclaw/openclaw.json`（JSON）
+- 同目录下的 **`openclaw.yaml`**（若你的环境使用 YAML——**字段含义一致**，仅语法不同）
+
+在 `plugins.entries.<插件id>.config` 下配置存储、可视化、采集、告警，以及 **`contextReducer`** 裁剪流水线。每个 reducer 可用各自的 **`enabled`** 单独开关；将顶层 **`contextReducer.enabled`** 设为 `false` 可关闭整条流水线。
+
+`entries` 下的键名须与 **`openclaw plugins list`** 一致：本仓库 **`install -l`** 一般为 **`contextscope`**；npm 安装常为 **`openclaw-contextscope`**。
 
 ```json
 {
   "plugins": {
     "entries": {
-      "openclaw-contextscope": {
+      "contextscope": {
         "enabled": true,
         "config": {
           "storage": {
@@ -153,6 +200,20 @@ ContextScope 将自动：
             "enabled": true,
             "tokenThreshold": 50000,
             "costThreshold": 10.0
+          },
+          "contextReducer": {
+            "enabled": true,
+            "preserveRecentTurns": 2,
+            "duplicateDeduper": { "enabled": true },
+            "toolInputTrimmer": { "enabled": true, "maxInputChars": 200 },
+            "contentPreviewer": {
+              "enabled": true,
+              "minContentChars": 500,
+              "headLines": 10,
+              "tailLines": 5
+            },
+            "toolResultPrioritizer": { "enabled": true, "lowPriorityMaxChars": 100 },
+            "logging": { "enabled": true }
           }
         }
       }
@@ -161,20 +222,48 @@ ContextScope 将自动：
 }
 ```
 
+**YAML 示例**（`contextReducer` 结构相同；若 `plugins list` 显示其它 id，请替换 `contextscope`）：
+
+```yaml
+plugins:
+  entries:
+    contextscope:
+      enabled: true
+      config:
+        contextReducer:
+          enabled: true
+          preserveRecentTurns: 2
+          duplicateDeduper:
+            enabled: false
+          toolInputTrimmer:
+            enabled: true
+            maxInputChars: 200
+          contentPreviewer:
+            enabled: true
+            minContentChars: 500
+            headLines: 10
+            tailLines: 5
+          toolResultPrioritizer:
+            enabled: true
+            lowPriorityMaxChars: 100
+          logging:
+            enabled: true
+```
+
+将某个子项（如 `duplicateDeduper.enabled`）设为 `false` 仅跳过该步骤，其余 reducer 仍按固定顺序执行。
+
 ## 🏗️ 架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    OpenClaw Gateway                      │
-│  ┌─────────────────┐         ┌──────────────────────┐  │
-│  │  ContextScope   │◄───────►│   React Dashboard    │  │
-│  │  Plugin Core    │  HTTP   │   (Vite + Tailwind)  │  │
-│  │                 │         │                      │  │
-│  │ • LLM Hooks     │         │ • Real-time Charts   │  │
-│  │ • Task Tracker  │         │ • Interactive Tables │  │
-│  │ • Token Counter │         │ • Export Tools       │  │
-│  └────────┬────────┘         └──────────────────────┘  │
-│           │                                              │
+│  ┌──────────────────────────────┐                      │
+│  │  ContextScope 插件         │  HTTP :18790 (PORT) │
+│  │  • dist/index.js + hooks     │  /api/* , /plugins/…│
+│  │  • 内嵌 Express 服务         │                      │
+│  └────────┬─────────────────────┘                      │
+│           │         ▲                                    │
+│           │         └── React 看板 (dist/frontend)      │
 │           ▼                                              │
 │  ┌─────────────────┐                                    │
 │  │  JSONL Storage  │  ~/.openclaw/contextscope/         │
@@ -183,7 +272,11 @@ ContextScope 将自动：
 └─────────────────────────────────────────────────────────┘
 ```
 
+网关也可能在其它端口反向代理界面；**本仓库中的 HTTP API 由插件进程提供**（默认 **`127.0.0.1:18790`**）。
+
 ## 📊 API 端点
+
+默认基地址：`http://127.0.0.1:18790`
 
 | 端点 | 描述 |
 |------|------|
@@ -194,6 +287,8 @@ ContextScope 将自动：
 | `GET /api/export?format=json\|csv` | 数据导出 |
 | `GET /api/timeline` | 可视化时间线数据 |
 | `GET /api/chains` | 请求链关系 |
+| `GET /api/reduction-logs` | 上下文裁剪运行日志 |
+| `GET /api/reduction-logs/summary` | 裁剪统计汇总 |
 
 ## 🔧 开发
 
@@ -201,24 +296,27 @@ ContextScope 将自动：
 - Node.js 18+
 - 已安装 OpenClaw CLI
 
-### 后端（插件）
+### 后端（插件核心）
 ```bash
-cd openclaw-contextscope
+cd ContextScope   # 仓库根目录
 npm install
-npm run build:backend
+npm run build       # 等同 npm run build:backend（tsc）
 ```
 
-### 前端（仪表板）
+### 前端（看板）
 ```bash
-cd openclaw-contextscope/frontend
+cd ContextScope/frontend
 npm install
-npm run dev        # 开发服务器
-npm run build      # 生产构建
+npm run dev         # Vite 开发服务器
+npm run build       # 产物 → frontend/dist
 ```
 
-### 完整构建
+### 完整构建与本地安装
 ```bash
-npm run build:all  # 同时构建前端和后端
+cd ContextScope
+npm run build:all   # 后端 tsc + 拷贝 frontend/dist → dist/frontend
+openclaw plugins install -l "$(pwd)"
+openclaw gateway restart
 ```
 
 ## 🆚 与替代方案对比
